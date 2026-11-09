@@ -570,7 +570,8 @@ static int smb5_get_prop_health(struct smb5_chip *chip, int *val)
 	}
 
 	if (stat & CHARGER_ERROR_STATUS_BAT_OV_BIT) {
-		dev_err(chip->dev, "battery over-voltage");
+		*val = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+		return 0;
 	}
 
 	rc = regmap_read(chip->regmap, chip->base + BATTERY_CHARGER_STATUS_7_REG,
