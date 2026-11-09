@@ -599,6 +599,7 @@ static int smb5_get_property(struct power_supply *psy,
 			     union power_supply_propval *val)
 {
 	struct smb5_chip *chip = power_supply_get_drvdata(psy);
+	int ret;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_MANUFACTURER:
@@ -610,8 +611,11 @@ static int smb5_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return smb5_get_current_limit(chip, &val->intval);
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		return smb5_get_iio_chan(chip, chip->usb_in_i_chan,
-					 &val->intval);
+		ret = smb5_get_iio_chan(chip, chip->usb_in_i_chan, &val->intval);
+		/* The current-sense channel is 0.2 V/A, reported in microvolts. */
+		if (!ret)
+			val->intval *= 5;
+		return ret;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		return smb5_get_iio_chan(chip, chip->usb_in_v_chan,
 					 &val->intval);
