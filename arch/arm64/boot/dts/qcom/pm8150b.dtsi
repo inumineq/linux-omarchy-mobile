@@ -113,11 +113,13 @@
 			interrupts = <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x12 0x2 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
-				     <0x2 0x13 0x7 IRQ_TYPE_EDGE_RISING>;
+				     <0x2 0x13 0x7 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x13 0x6 IRQ_TYPE_EDGE_RISING>;
 			interrupt-names = "usbin-plugin",
 					  "bat-ov",
 					  "wdog-bark",
-					  "usbin-icl-change";
+					  "usbin-icl-change",
+					  "usbin-src-change";
 
 			io-channels = <&pm8150b_adc 7>,
 				      <&pm8150b_adc 8>;
