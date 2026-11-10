@@ -538,12 +538,13 @@ static void smb5_status_change_work(struct work_struct *work)
 static int smb5_get_iio_chan(struct smb5_chip *chip, struct iio_channel *chan,
 			     int *val)
 {
-	int rc;
-	union power_supply_propval status;
+	int online, rc;
 
-	rc = power_supply_get_property(chip->chg_psy, POWER_SUPPLY_PROP_STATUS,
-				       &status);
-	if (rc < 0 || status.intval != POWER_SUPPLY_STATUS_CHARGING) {
+	/* USB may power the system while battery charging is inhibited or full. */
+	rc = smb5_get_prop_usb_online(chip, &online);
+	if (rc)
+		return rc;
+	if (!online) {
 		*val = 0;
 		return 0;
 	}
