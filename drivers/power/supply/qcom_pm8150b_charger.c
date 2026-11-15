@@ -186,6 +186,8 @@
 #define DCIN_SUSPEND_BIT			BIT(0)
 
 #define TYPE_C_SNK_STATUS			0x506
+#define TYPE_C_MISC_STATUS			0x50b
+#define TYPEC_SNK_SRC_MODE_BIT			BIT(6)
 #define DETECTED_SRC_TYPE_MASK			GENMASK(6, 0)
 #define SNK_RP_STD_DAM_BIT			BIT(6)
 #define SNK_RP_1P5_DAM_BIT			BIT(5)
@@ -349,6 +351,23 @@ static int smb5_get_prop_usb_online(struct smb5_chip *chip, int *val)
 
 	*val = (stat & USBIN_PLUGIN_RT_STS_BIT) ? 1 : 0;
 	return 0;
+}
+
+/*
+ * True when the charger sees VBUS that it did not source itself: USBIN is
+ * plugged in and the Type-C block is not in source mode.
+ */
+static bool smb5_sink_vbus_present(struct smb5_chip *chip)
+{
+	unsigned int misc;
+	int online = 0;
+
+	if (smb5_get_prop_usb_online(chip, &online) || !online)
+		return false;
+	if (regmap_read(chip->regmap, chip->base + TYPE_C_MISC_STATUS, &misc))
+		return false;
+
+	return !(misc & TYPEC_SNK_SRC_MODE_BIT);
 }
 
 /*
@@ -659,6 +678,18 @@ static void smb5_status_change_work(struct work_struct *work)
 	}
 
 apply:
+	/*
+	 * A sink may always draw pSnkStdby (2.5 W, 500 mA at 5 V). Do not cut
+	 * the input completely while an external source still supplies VBUS:
+	 * if TCPM loses track of the partner, the phone would otherwise run
+	 * from the battery until it is empty, with the charger attached.
+	 */
+	if (current_ua < SDP_CURRENT_UA && smb5_sink_vbus_present(chip)) {
+		/* Routine during attach debounce, so not worth a warning. */
+		dev_dbg(chip->dev, "VBUS present without a source limit, using %u uA\n",
+			SDP_CURRENT_UA);
+		current_ua = SDP_CURRENT_UA;
+	}
 	chip->source_current_limit = clamp(current_ua, 0, CURRENT_MAX_UA);
 	ret = smb5_apply_input_limit(chip,
 		min(chip->source_current_limit, chip->user_current_limit), apsd);
@@ -685,10 +716,18 @@ apply:
 fail:
 	chip->apsd_started = false;
 	chip->apsd_retries = 0;
-	chip->source_current_limit = 0;
 	chip->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
-	regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
-			   USBIN_SUSPEND_BIT, USBIN_SUSPEND_BIT);
+	if (smb5_sink_vbus_present(chip)) {
+		/* Keep pSnkStdby so a flat battery is not left to carry the system. */
+		chip->source_current_limit = SDP_CURRENT_UA;
+		smb5_apply_input_limit(chip,
+			min(chip->source_current_limit, chip->user_current_limit),
+			false);
+	} else {
+		chip->source_current_limit = 0;
+		regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
+				   USBIN_SUSPEND_BIT, USBIN_SUSPEND_BIT);
+	}
 	dev_err_ratelimited(chip->dev, "Unable to apply input power limit: %d\n", ret);
 	mod_delayed_work(system_wq, &chip->status_change_work, HZ);
 unlock:
