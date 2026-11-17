@@ -1128,3 +1128,8 @@
 	};
 };
 
+
+&slpi {
+	firmware-name = "qcom/sm8250/OnePlus/instantnoodlep/slpi.mbn";
+	status = "okay";
+};
