@@ -19899,6 +19899,13 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/sound/nxp,tfa989x.yaml
 F:	sound/soc/codecs/tfa989x.c
 
+NXP/Goodix TFA987X (TFA2) DRIVER
+M:	Mikkel Inumineq Jørgensen <6770514+inumineq@users.noreply.github.com>
+L:	linux-sound@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/sound/nxp,tfa987x.yaml
+F:	sound/soc/codecs/tfa987x.c
+
 NZXT-KRAKEN2 HARDWARE MONITORING DRIVER
 M:	Jonas Malaco <jonas@protocubo.io>
 L:	linux-hwmon@vger.kernel.org

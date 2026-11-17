@@ -2307,6 +2307,18 @@ config SND_SOC_TFA989X
 	  Note that the driver currently bypasses the built-in "CoolFlux DSP"
 	  and does not support (hardware) volume control.
 
+config SND_SOC_TFA987X
+	tristate "NXP/Goodix TFA987X (TFA2) amplifiers"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Enable support for NXP (now Goodix) TFA9872, TFA9873 and TFA9874
+	  smart speaker amplifiers, which are programmed directly over I2C.
+
+	  The amplifier starts powered down and muted with minimum gain and
+	  a raw gain volume control; the boost converter stays disabled at
+	  its reset defaults.
+
 config SND_SOC_TLV320ADC3XXX
 	tristate "Texas Instruments TLV320ADC3001/3101 audio ADC"
 	depends on I2C
