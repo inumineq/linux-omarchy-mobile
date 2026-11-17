@@ -12,6 +12,9 @@
 #include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/soc/qcom/qmi.h>
+#include <linux/soc/qcom/smem.h>
+
+#include <dt-bindings/arm/qcom,ids.h>
 
 #include "pdr_internal.h"
 
@@ -668,6 +671,37 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
 	{},
 };
 
+/*
+ * Some bootloaders rewrite the root compatible of the DT they pass on, so
+ * that the SoC compatible is missing from it. The OnePlus 8 Pro ABL, for
+ * one, applies a vendor overlay that replaces it with "qcom,kona".
+ * Fall back to the SoC ID that the boot chain stores in SMEM.
+ */
+static const struct {
+	u32 soc_id;
+	const struct qcom_pdm_domain_data * const *domains;
+} qcom_pdm_soc_ids[] = {
+	{ QCOM_ID_SM8250, sm8250_domains },
+};
+
+static const struct qcom_pdm_domain_data * const *qcom_pdm_match_soc_id(void)
+{
+	u32 soc_id;
+	int ret, i;
+
+	ret = qcom_smem_get_soc_id(&soc_id);
+	if (ret == -EPROBE_DEFER)
+		return ERR_PTR(ret);
+	if (ret)
+		return ERR_PTR(-ENODEV);
+
+	for (i = 0; i < ARRAY_SIZE(qcom_pdm_soc_ids); i++)
+		if (qcom_pdm_soc_ids[i].soc_id == soc_id)
+			return qcom_pdm_soc_ids[i].domains;
+
+	return ERR_PTR(-ENODEV);
+}
+
 static void qcom_pdm_stop(struct qcom_pdm_data *data)
 {
 	qcom_pdm_free_domains(data);
@@ -686,12 +720,17 @@ static struct qcom_pdm_data *qcom_pdm_start(void)
 	int ret, i;
 
 	match = of_machine_get_match(qcom_pdm_domains);
-	if (!match) {
-		pr_notice("PDM: no support for the platform, userspace daemon might be required.\n");
-		return ERR_PTR(-ENODEV);
+	if (match) {
+		domains = match->data;
+	} else {
+		domains = qcom_pdm_match_soc_id();
+		if (IS_ERR(domains)) {
+			if (PTR_ERR(domains) != -EPROBE_DEFER)
+				pr_notice("PDM: no support for the platform, userspace daemon might be required.\n");
+			return ERR_CAST(domains);
+		}
 	}
 
-	domains = match->data;
 	if (!domains) {
 		pr_debug("PDM: no domains\n");
 		return ERR_PTR(-ENODEV);
