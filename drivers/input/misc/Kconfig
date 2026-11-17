@@ -148,6 +148,18 @@ config INPUT_BBNSM_PWRKEY
 	  To compile this driver as a module, choose M here; the
 	  module will be called bbnsm_pwrkey.
 
+config INPUT_AW8695_HAPTICS
+	tristate "Awinic AW8697 haptics support"
+	depends on I2C && GPIOLIB && OF
+	select INPUT_FF_MEMLESS
+	select REGMAP_I2C
+	help
+	  Firmware-free, finite-burst force feedback for the AW8697 LRA.
+	  Uses a generated sine and board-specific resonance parameters.
+	  Calibration runs at probe; enable only with known actuator data.
+	  To compile this driver as a module, choose M here: the module
+	  will be called aw8695-haptics.
+
 config INPUT_BMA150
 	tristate "BMA150/SMB380 acceleration sensor support"
 	depends on I2C
