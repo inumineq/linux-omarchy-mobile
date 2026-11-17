@@ -183,7 +183,6 @@ static const struct of_device_id blocklist[] __initconst = {
 	{ .compatible = "qcom,sm7325", },
 	{ .compatible = "qcom,sm8150", },
 	{ .compatible = "qcom,sm8250", },
-	{ .compatible = "qcom,kona", }, /* TEST ONLY: stock dtbo root */
 	{ .compatible = "qcom,sm8350", },
 	{ .compatible = "qcom,sm8450", },
 	{ .compatible = "qcom,sm8550", },
