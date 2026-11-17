@@ -870,3 +870,48 @@
 	};
 };
 
+
+&lpass_tlmm {
+	dmic23_active: dmic23-active-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <8>;
+			input-enable;
+		};
+	};
+
+	dmic23_sleep: dmic23-sleep-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <2>;
+			bias-disable;
+			output-low;
+		};
+
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <2>;
+			bias-pull-down;
+			input-enable;
+		};
+	};
+};
+
+
+&vamacro {
+	pinctrl-0 = <&dmic01_active>, <&dmic23_active>;
+	pinctrl-1 = <&dmic01_sleep>, <&dmic23_sleep>;
+	pinctrl-names = "default", "sleep";
+	vdd-micb-supply = <&vreg_bob>;
+	qcom,dmic-sample-rate = <2400000>;
+};
