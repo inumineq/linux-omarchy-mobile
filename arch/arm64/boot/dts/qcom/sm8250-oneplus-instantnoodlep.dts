@@ -55,6 +55,16 @@
 			height = <2376>;
 			stride = <(1080 * 4)>;
 			format = "a8r8g8b8";
+			clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
+				 <&gcc GCC_DISP_HF_AXI_CLK>,
+				 <&gcc GCC_DISP_SF_AXI_CLK>,
+				 <&dispcc DISP_CC_MDSS_VSYNC_CLK>,
+				 <&dispcc DISP_CC_MDSS_MDP_CLK>,
+				 <&dispcc DISP_CC_MDSS_BYTE0_CLK>,
+				 <&dispcc DISP_CC_MDSS_BYTE0_INTF_CLK>,
+				 <&dispcc DISP_CC_MDSS_PCLK0_CLK>,
+				 <&dispcc DISP_CC_MDSS_ESC0_CLK>;
+			power-domains = <&dispcc MDSS_GDSC>;
 		};
 	};
 
@@ -294,10 +304,6 @@
 	};
 };
 
-&dispcc {
-	/* The bootloader's framebuffer is the display; keep it untouched. */
-	status = "disabled";
-};
 
 &gpi_dma1 {
 	status = "okay";
