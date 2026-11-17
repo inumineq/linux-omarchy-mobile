@@ -435,6 +435,10 @@
 	status = "okay";
 };
 
+&gpi_dma2 {
+	status = "okay";
+};
+
 &gpu {
 	status = "okay";
 };
@@ -462,6 +466,22 @@
 
 		pinctrl-0 = <&ts_int_default>, <&ts_reset_default>;
 		pinctrl-names = "default";
+	};
+};
+
+&i2c16 {
+	clock-frequency = <100000>;
+	status = "okay";
+
+	/*
+	 * No monitored-battery: the bq27411 keeps its data memory in RAM,
+	 * so the driver would rewrite the gauge's design capacity from a
+	 * simple-battery node on every probe. The gauge stays as the stock
+	 * firmware left it.
+	 */
+	fuel-gauge@55 {
+		compatible = "ti,bq27411";
+		reg = <0x55>;
 	};
 };
 
@@ -560,6 +580,10 @@
 };
 
 &qupv3_id_1 {
+	status = "okay";
+};
+
+&qupv3_id_2 {
 	status = "okay";
 };
 
