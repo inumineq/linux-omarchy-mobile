@@ -346,8 +346,20 @@
 };
 
 
+&gmu {
+	status = "okay";
+};
+
 &gpi_dma1 {
 	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/OnePlus/instantnoodlep/a650_zap.mbn";
 };
 
 &i2c13 {
