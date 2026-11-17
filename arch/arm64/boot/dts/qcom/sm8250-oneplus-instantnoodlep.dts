@@ -44,6 +44,10 @@
 	qcom,msm-id = <0x164 0x10000>, <0x164 0x20001>;
 	qcom,board-id = <0x08 0x00>, <0x00 0x00>;
 
+	aliases {
+		serial1 = &uart6;
+	};
+
 	chosen {
 		#address-cells = <2>;
 		#size-cells = <2>;
