@@ -1720,7 +1720,7 @@ static const struct of_device_id smb5_match_id_table[] = {
 	{ .compatible = "qcom,pm8150b-charger", .data = "pm8150b" },
 	{ /* sentinal */ }
 };
-MODULE_DEVICE_TABLE(of, smb5_match_id_table);
+/* Test-only: no MODULE_DEVICE_TABLE, so the module is never autoloaded. */
 
 static struct platform_driver qcom_spmi_smb5 = {
 	.probe = smb5_probe,

@@ -584,6 +584,15 @@
 	};
 };
 
+/* Test-only: nothing uses these; keep them out of the charger test. */
+&pm8150b_gpios {
+	status = "disabled";
+};
+
+&pm8150b_temp {
+	status = "disabled";
+};
+
 &pm8150b_charger {
 	monitored-battery = <&charger_battery>;
 	/* The gauge at the cell decides when the battery is full, as in stock. */
