@@ -15,6 +15,7 @@
 #include "sm8250.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150l.dtsi"
+#include "pm8009.dtsi"
 
 /*
  * Delete following upstream (sm8250.dtsi) reserved
@@ -197,6 +198,21 @@
 };
 
 &apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8009-1-rpmh-regulators";
+		qcom,pmic-id = "f";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+
+		vreg_s2f_0p95: smps2 {
+			regulator-name = "vreg_s2f_0p95";
+			regulator-min-microvolt = <900000>;
+			regulator-max-microvolt = <952000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+		};
+	};
+
 	regulators-1 {
 		compatible = "qcom,pm8150-rpmh-regulators";
 		qcom,pmic-id = "a";
