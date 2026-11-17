@@ -216,6 +216,33 @@ static const struct of_device_id blocklist[] __initconst = {
 	{ }
 };
 
+/*
+ * Nodes of CPU frequency controllers with their own cpufreq driver. They
+ * identify the hardware without relying on the root compatible, which some
+ * bootloaders rewrite: the OnePlus 8 Pro ABL, for one, replaces
+ * "qcom,sm8250" with "qcom,kona".
+ */
+static const struct of_device_id blocklist_nodes[] __initconst = {
+	{ .compatible = "qcom,cpufreq-epss", },
+	{ .compatible = "qcom,cpufreq-hw", },
+	{ .compatible = "qcom,shikra-epss", },
+	{ }
+};
+
+static bool __init has_blocklisted_node(void)
+{
+	struct device_node *np;
+
+	for_each_matching_node(np, blocklist_nodes) {
+		if (of_device_is_available(np)) {
+			of_node_put(np);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static bool __init cpu0_node_has_opp_v2_prop(void)
 {
 	struct device_node *np __free(device_node) = of_cpu_device_node_get(0);
@@ -236,7 +263,8 @@ static int __init cpufreq_dt_platdev_init(void)
 		goto create_pdev;
 	}
 
-	if (cpu0_node_has_opp_v2_prop() && !of_machine_device_match(blocklist))
+	if (cpu0_node_has_opp_v2_prop() && !of_machine_device_match(blocklist) &&
+	    !has_blocklisted_node())
 		goto create_pdev;
 
 	return -ENODEV;
