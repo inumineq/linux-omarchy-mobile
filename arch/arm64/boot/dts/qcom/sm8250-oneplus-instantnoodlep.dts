@@ -45,14 +45,14 @@
 	qcom,msm-id = <0x164 0x10000>, <0x164 0x20001>;
 	qcom,board-id = <0x08 0x00>, <0x00 0x00>;
 
-
 	wcd938x: audio-codec {
 		compatible = "qcom,wcd9385-codec";
 
 		pinctrl-0 = <&wcd_default>;
 		pinctrl-names = "default";
 
-		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-buttons-vthreshold-microvolt =
+			<75000 150000 237000 500000 500000 500000 500000 500000>;
 		qcom,mbhc-headset-vthreshold-microvolt = <2600000>;
 		qcom,mbhc-headphone-vthreshold-microvolt = <75000>;
 		qcom,micbias1-microvolt = <1800000>;
@@ -374,7 +374,6 @@
 	};
 };
 
-
 &gmu {
 	status = "okay";
 };
@@ -595,7 +594,6 @@
 	};
 };
 
-
 &swr2 {
 	status = "okay";
 
@@ -605,7 +603,6 @@
 		qcom,tx-port-mapping = <2 2 3 4>;
 	};
 };
-
 
 &tlmm {
 	wcd_default: wcd-default-state {
@@ -643,7 +640,6 @@
 	};
 };
 
-
 &lpass_tlmm {
 	dmic23_active: dmic23-active-state {
 		clk-pins {
@@ -679,7 +675,6 @@
 		};
 	};
 };
-
 
 &vamacro {
 	pinctrl-0 = <&dmic01_active>, <&dmic23_active>;
@@ -807,7 +802,6 @@
 		};
 	};
 
-
 	va-dai-link {
 		link-name = "VA Capture";
 
@@ -857,10 +851,7 @@
 	};
 };
 
-
 &q6afedai {
-
-
 
 	dai@110 {
 		reg = <VA_CODEC_DMA_TX_0>;
@@ -873,7 +864,6 @@
 	dai@120 {
 		reg = <TX_CODEC_DMA_TX_3>;
 	};
-
 
 };
 
