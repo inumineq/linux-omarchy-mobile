@@ -13,6 +13,8 @@
 #include <linux/soc/qcom/ubwc.h>
 #include <linux/soc/qcom/smem.h>
 
+#include <dt-bindings/arm/qcom,ids.h>
+
 static const struct qcom_ubwc_cfg_data no_ubwc_data = {
 	/* no UBWC, no HBB */
 };
@@ -169,6 +171,34 @@ static const struct of_device_id qcom_ubwc_configs[] __maybe_unused = {
 	{ }
 };
 
+/*
+ * Some bootloaders rewrite the root compatible of the DT they pass on, so
+ * that the SoC compatible is missing from it. The OnePlus 8 Pro ABL, for
+ * one, applies a vendor overlay that replaces it with "qcom,kona".
+ * Fall back to the SoC ID that the boot chain stores in SMEM.
+ */
+static const struct {
+	u32 soc_id;
+	const struct qcom_ubwc_cfg_data *data;
+} qcom_ubwc_soc_ids[] = {
+	{ QCOM_ID_SM8250, &ubwc_4_0_hbb16 },
+};
+
+static const struct qcom_ubwc_cfg_data *qcom_ubwc_match_soc_id(void)
+{
+	u32 soc_id;
+	int i;
+
+	if (qcom_smem_get_soc_id(&soc_id))
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(qcom_ubwc_soc_ids); i++)
+		if (qcom_ubwc_soc_ids[i].soc_id == soc_id)
+			return qcom_ubwc_soc_ids[i].data;
+
+	return NULL;
+}
+
 static struct qcom_ubwc_cfg_data *cfg;
 static DEFINE_MUTEX(cfg_mutex);
 /**
@@ -190,6 +220,8 @@ const struct qcom_ubwc_cfg_data *qcom_ubwc_config_get_data(void)
 		return ERR_PTR(-EPROBE_DEFER);
 
 	data = of_machine_get_match_data(qcom_ubwc_configs);
+	if (!data)
+		data = qcom_ubwc_match_soc_id();
 	if (!data) {
 		pr_err("Couldn't find UBWC config data for this platform!\n");
 		return ERR_PTR(-EINVAL);
