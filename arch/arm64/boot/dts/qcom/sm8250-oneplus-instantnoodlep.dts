@@ -976,9 +976,9 @@
 	status = "okay";
 };
 
-/* Enable only in a separately gated RAM candidate until device validation. */
+/* Haptics passed the bounded M3a test on 2026-11-18 (RAM boot). */
 &i2c11 {
-	status = "disabled";
+	status = "okay";
 
 	haptics: haptics@5a {
 		compatible = "awinic,aw8697";
@@ -1000,7 +1000,7 @@
 		awinic,r-spare = /bits/ 8 <0x68>;
 		awinic,bemf-upper-threshold = <4104>;
 		awinic,bemf-lower-threshold = <1016>;
-		status = "disabled";
+		status = "okay";
 	};
 };
 
@@ -1077,8 +1077,6 @@
 
 /* TFA9874 support is staged separately; no speaker path in phase 1. */
 &i2c15 {
-	status = "disabled";
-
 	top_spkr: tfa9874@34 {
 		compatible = "nxp,tfa9874";
 		status = "disabled";
