@@ -509,7 +509,7 @@
 &camss {
 	vdda-phy-supply = <&vreg_l5a_0p88>;
 	vdda-pll-supply = <&vreg_l9a_1p2>;
-	status = "disabled";
+	status = "okay";
 
 	ports {
 		port@3 {
@@ -534,7 +534,7 @@
 
 &cci1_i2c1 {
 	camera@10 {
-		status = "disabled";
+		status = "okay";
 		compatible = "sony,imx471";
 		reg = <0x10>;
 		clocks = <&camcc CAM_CC_MCLK3_CLK>;
