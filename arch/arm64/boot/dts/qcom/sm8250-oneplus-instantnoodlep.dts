@@ -770,8 +770,18 @@
 };
 
 &usb_1_dwc3 {
-	/* Fixed peripheral role until the Type-C role switch is described. */
-	dr_mode = "peripheral";
+	/*
+	 * Dual-role through the PM8150B Type-C port. The default role stays
+	 * peripheral so USB gadget networking to the laptop works even if
+	 * the Type-C stack has not reported a role yet.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+};
+
+&usb_1_dwc3_hs_out {
+	remote-endpoint = <&pm8150b_hs_in>;
 };
 
 &usb_1_hsphy {
@@ -782,7 +792,12 @@
 };
 
 &usb_1_qmpphy {
+	mode-switch;
 	vdda-phy-supply = <&vreg_l9a_1p2>;
 	vdda-pll-supply = <&vreg_l18a_0p92>;
 	status = "okay";
+};
+
+&usb_1_qmpphy_out {
+	remote-endpoint = <&pm8150b_ss_in>;
 };
