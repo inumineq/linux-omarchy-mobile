@@ -1366,6 +1366,8 @@
 &slpi {
 	firmware-name = "qcom/sm8250/OnePlus/instantnoodlep/slpi.mbn";
 	status = "okay";
+};
+
 &usb_1_qmpphy_out {
 	remote-endpoint = <&pm8150b_ss_in>;
 };
