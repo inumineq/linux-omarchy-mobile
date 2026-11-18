@@ -12,8 +12,10 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8250.dtsi"
 #include "pm8150.dtsi"
+#include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
 #include "pm8009.dtsi"
 
@@ -469,6 +471,24 @@
 	};
 };
 
+&i2c15 {
+	status = "okay";
+
+	fsa4480: typec-mux@42 {
+		compatible = "fcs,fsa4480";
+		reg = <0x42>;
+
+		mode-switch;
+		orientation-switch;
+
+		port {
+			fsa4480_sbu: endpoint {
+				remote-endpoint = <&pm8150b_sbu>;
+			};
+		};
+	};
+};
+
 &i2c16 {
 	clock-frequency = <100000>;
 	status = "okay";
@@ -569,6 +589,62 @@
 		input-enable;
 		bias-pull-up;
 	};
+};
+
+&pm8150b_typec {
+	status = "okay";
+
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+	vdd-vbus-supply = <&pm8150b_vbus>;
+
+	connector {
+		compatible = "usb-c-connector";
+
+		power-role = "dual";
+		data-role = "dual";
+		self-powered;
+
+		/* Stock sink capabilities (stock dtbo entry 16), 5 V/3 A, 9 V/3 A, 12 V/2.25 A. */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>,
+			    <PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)>,
+			    <PDO_FIXED(12000, 2250, PDO_FIXED_USB_COMM)>;
+		source-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				pm8150b_hs_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				pm8150b_ss_in: endpoint {
+					remote-endpoint = <&usb_1_qmpphy_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+				pm8150b_sbu: endpoint {
+					remote-endpoint = <&fsa4480_sbu>;
+				};
+			};
+		};
+	};
+};
+
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+	status = "okay";
 };
 
 &pon_pwrkey {
