@@ -25619,6 +25619,7 @@ SONY IMX471 SENSOR DRIVER
 M:	Kate Hsuan <hpa@redhat.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx471.yaml
 F:	drivers/media/i2c/imx471.c
 
 SONY IMX678 SENSOR DRIVER
