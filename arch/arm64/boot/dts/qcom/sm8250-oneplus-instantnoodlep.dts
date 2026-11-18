@@ -17,6 +17,7 @@
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include "sm8250.dtsi"
 #include "pm8150.dtsi"
+#include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
 #include "pm8009.dtsi"
 
@@ -77,6 +78,17 @@
 		vdd-mic-bias-supply = <&vreg_bob>;
 
 		#sound-dai-cells = <1>;
+	};
+
+	/*
+	 * For the charger only: the fuel gauge must not reference this node,
+	 * see &i2c16. 4.35 V is the rated cell voltage, used only without
+	 * the fuel-gauge policy; 2 A is the stock normal-temperature limit.
+	 */
+	charger_battery: battery {
+		compatible = "simple-battery";
+		voltage-max-design-microvolt = <4350000>;
+		constant-charge-current-max-microamp = <2000000>;
 	};
 
 	chosen {
@@ -272,6 +284,7 @@
 			reg = <0x0 0xb0000000 0x0 0x400000>;
 			record-size = <0x40000>;
 			console-size = <0x40000>;
+			pmsg-size = <0x40000>;
 			ecc-size = <0x0>;
 			no-map;
 		};
@@ -509,7 +522,7 @@
 	 * simple-battery node on every probe. The gauge stays as the stock
 	 * firmware left it.
 	 */
-	fuel-gauge@55 {
+	fuel_gauge: fuel-gauge@55 {
 		compatible = "ti,bq27411";
 		reg = <0x55>;
 	};
@@ -599,6 +612,22 @@
 		input-enable;
 		bias-pull-up;
 	};
+};
+
+/* Test-only: nothing uses these; keep them out of the charger test. */
+&pm8150b_gpios {
+	status = "disabled";
+};
+
+&pm8150b_temp {
+	status = "disabled";
+};
+
+&pm8150b_charger {
+	monitored-battery = <&charger_battery>;
+	/* The gauge at the cell decides when the battery is full, as in stock. */
+	qcom,fuel-gauge = <&fuel_gauge>;
+	status = "okay";
 };
 
 &pon_pwrkey {
