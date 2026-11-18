@@ -614,10 +614,12 @@
 		data-role = "dual";
 		self-powered;
 
-		/* Stock sink capabilities (stock dtbo entry 16), 5 V/3 A, 9 V/3 A, 12 V/2.25 A. */
-		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>,
-			    <PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)>,
-			    <PDO_FIXED(12000, 2250, PDO_FIXED_USB_COMM)>;
+		/*
+		 * 5 V only until the charger is qualified: stock also offers
+		 * 9 V/3 A and 12 V/2.25 A (stock dtbo entry 16), but no driver
+		 * programs the PM8150B charger on this kernel.
+		 */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
 		source-pdos = <PDO_FIXED(5000, 3000,
 					 PDO_FIXED_DUAL_ROLE |
 					 PDO_FIXED_USB_COMM |
