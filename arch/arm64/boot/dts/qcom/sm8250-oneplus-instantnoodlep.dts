@@ -15,6 +15,7 @@
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8250.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -512,6 +513,24 @@
 	};
 };
 
+&i2c15 {
+	status = "okay";
+
+	fsa4480: typec-mux@42 {
+		compatible = "fcs,fsa4480";
+		reg = <0x42>;
+
+		mode-switch;
+		orientation-switch;
+
+		port {
+			fsa4480_sbu: endpoint {
+				remote-endpoint = <&pm8150b_sbu>;
+			};
+		};
+	};
+};
+
 &i2c16 {
 	clock-frequency = <100000>;
 	status = "okay";
@@ -530,6 +549,16 @@
 
 &mdss {
 	status = "okay";
+};
+
+&mdss_dp {
+	status = "okay";
+};
+
+&mdss_dp_out {
+	data-lanes = <0 1 2 3>;
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
+	remote-endpoint = <&usb_1_qmpphy_dp_in>;
 };
 
 &mdss_dsi0 {
@@ -627,6 +656,71 @@
 	monitored-battery = <&charger_battery>;
 	/* The gauge at the cell decides when the battery is full, as in stock. */
 	qcom,fuel-gauge = <&fuel_gauge>;
+	status = "okay";
+};
+
+&pm8150b_typec {
+	status = "okay";
+
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+	vdd-vbus-supply = <&pm8150b_vbus>;
+
+	connector {
+		compatible = "usb-c-connector";
+
+		power-role = "dual";
+		data-role = "dual";
+		self-powered;
+
+		/*
+		 * 5 V only until the charger is qualified: stock also offers
+		 * 9 V/3 A and 12 V/2.25 A (stock dtbo entry 16), but no driver
+		 * programs the PM8150B charger on this kernel.
+		 */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+		source-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
+
+		altmodes {
+			displayport {
+				svid = /bits/ 16 <0xff01>;
+				vdo = <0x00001c46>;
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				pm8150b_hs_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				pm8150b_ss_in: endpoint {
+					remote-endpoint = <&usb_1_qmpphy_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+				pm8150b_sbu: endpoint {
+					remote-endpoint = <&fsa4480_sbu>;
+				};
+			};
+		};
+	};
+};
+
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
 	status = "okay";
 };
 
@@ -753,8 +847,18 @@
 };
 
 &usb_1_dwc3 {
-	/* Fixed peripheral role until the Type-C role switch is described. */
-	dr_mode = "peripheral";
+	/*
+	 * Dual-role through the PM8150B Type-C port. The default role stays
+	 * peripheral so USB gadget networking to the laptop works even if
+	 * the Type-C stack has not reported a role yet.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+};
+
+&usb_1_dwc3_hs_out {
+	remote-endpoint = <&pm8150b_hs_in>;
 };
 
 &usb_1_hsphy {
@@ -765,6 +869,7 @@
 };
 
 &usb_1_qmpphy {
+	mode-switch;
 	vdda-phy-supply = <&vreg_l9a_1p2>;
 	vdda-pll-supply = <&vreg_l18a_0p92>;
 	status = "okay";
@@ -1161,4 +1266,10 @@
 &slpi {
 	firmware-name = "qcom/sm8250/OnePlus/instantnoodlep/slpi.mbn";
 	status = "okay";
+&usb_1_qmpphy_out {
+	remote-endpoint = <&pm8150b_ss_in>;
+};
+
+&usb_1_qmpphy_dp_in {
+	remote-endpoint = <&mdss_dp_out>;
 };
