@@ -945,6 +945,8 @@
 };
 
 &usb_1 {
+	/* Use UTMI as the DWC3 pipe clock during the USB2 dock test. */
+	qcom,select-utmi-as-pipe-clk;
 	status = "okay";
 };
 
