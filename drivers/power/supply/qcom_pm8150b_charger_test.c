@@ -175,23 +175,23 @@ static struct smb5_cc_track smb5_classified(struct kunit *test,
 	struct smb5_cc_track t = {};
 	struct smb5_cc_step step;
 
-	step = smb5_cc_next(&t, true, cc, t0);
+	step = smb5_cc_next(&t, 0, true, cc, t0);
 	KUNIT_EXPECT_TRUE(test, step.replugged);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, step.recheck, SMB5_CC_SETTLE);
 
-	step = smb5_cc_next(&t, true, cc, t0 + SMB5_CC_SETTLE - 1);
+	step = smb5_cc_next(&t, 0, true, cc, t0 + SMB5_CC_SETTLE - 1);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, step.recheck, 1UL);
 
-	step = smb5_cc_next(&t, true, cc, t0 + SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, cc, t0 + SMB5_CC_SETTLE);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, t.state, SMB5_CC_SAMPLED);
 
-	step = smb5_cc_next(&t, true, cc, t0 + 2 * SMB5_CC_SETTLE - 1);
+	step = smb5_cc_next(&t, 0, true, cc, t0 + 2 * SMB5_CC_SETTLE - 1);
 	smb5_expect_hold(test, step);
 
-	step = smb5_cc_next(&t, true, cc, t0 + 2 * SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, cc, t0 + 2 * SMB5_CC_SETTLE);
 	KUNIT_EXPECT_FALSE(test, step.hold);
 	KUNIT_EXPECT_FALSE(test, step.replugged);
 	KUNIT_EXPECT_EQ(test, step.rp, cc->rp);
@@ -206,7 +206,7 @@ static void smb5_cc_attach_test(struct kunit *test)
 	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, t0);
 	struct smb5_cc_step step;
 
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0, t0 + 100 * SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, t0 + 100 * SMB5_CC_SETTLE);
 	KUNIT_EXPECT_FALSE(test, step.hold);
 	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_3P0);
 	KUNIT_EXPECT_EQ_MSG(test, step.recheck, 0UL, "no poll once classified");
@@ -220,12 +220,12 @@ static void smb5_cc_detach_test(struct kunit *test)
 	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, 1000);
 	struct smb5_cc_step step;
 
-	step = smb5_cc_next(&t, false, &smb5_cc_none, 5000);
+	step = smb5_cc_next(&t, 0, false, &smb5_cc_none, 5000);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ_MSG(test, step.recheck, 0UL, "no poll while detached");
 	KUNIT_EXPECT_EQ(test, t.state, SMB5_CC_DETACHED);
 
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0, 5001);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 5001);
 	KUNIT_EXPECT_TRUE(test, step.replugged);
 	smb5_expect_hold(test, step);
 }
@@ -240,7 +240,7 @@ static void smb5_cc_reattach_between_passes_test(struct kunit *test)
 	struct smb5_cc_step step;
 
 	t.state = SMB5_CC_DETACHED;
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0, 3000);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 3000);
 	KUNIT_EXPECT_TRUE(test, step.replugged);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, t.state, SMB5_CC_SETTLING);
@@ -252,12 +252,12 @@ static void smb5_cc_stale_sample_test(struct kunit *test)
 	struct smb5_cc_track t = {};
 	struct smb5_cc_step step;
 
-	smb5_cc_next(&t, true, &smb5_cc_3p0, 1000);
-	smb5_cc_next(&t, true, &smb5_cc_3p0, 1000 + SMB5_CC_SETTLE);
+	smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 1000);
+	smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 1000 + SMB5_CC_SETTLE);
 	KUNIT_ASSERT_EQ(test, t.state, SMB5_CC_SAMPLED);
 
 	t.state = SMB5_CC_DETACHED;
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0, 1000 + 2 * SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 1000 + 2 * SMB5_CC_SETTLE);
 	KUNIT_EXPECT_TRUE(test, step.replugged);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, step.recheck, SMB5_CC_SETTLE);
@@ -269,16 +269,16 @@ static void smb5_cc_hardware_change_test(struct kunit *test)
 	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, 1000);
 	struct smb5_cc_step step;
 
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0_flipped, 4000);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0_flipped, 4000);
 	KUNIT_EXPECT_TRUE(test, step.replugged);
 	smb5_expect_hold(test, step);
 
 	t = smb5_classified(test, &smb5_cc_3p0, 1000);
-	step = smb5_cc_next(&t, true, &smb5_cc_1p5, 4000);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_1p5, 4000);
 	KUNIT_EXPECT_FALSE(test, step.replugged);
 	smb5_expect_hold(test, step);
-	smb5_cc_next(&t, true, &smb5_cc_1p5, 4000 + SMB5_CC_SETTLE);
-	step = smb5_cc_next(&t, true, &smb5_cc_1p5, 4000 + 2 * SMB5_CC_SETTLE);
+	smb5_cc_next(&t, 0, true, &smb5_cc_1p5, 4000 + SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_1p5, 4000 + 2 * SMB5_CC_SETTLE);
 	KUNIT_EXPECT_FALSE(test, step.hold);
 	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_1P5);
 }
@@ -292,14 +292,14 @@ static void smb5_cc_unstable_test(struct kunit *test)
 	struct smb5_cc_step step;
 	int i;
 
-	smb5_cc_next(&t, true, &smb5_cc_3p0, 1000);
+	smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 1000);
 	for (i = 0; i < ARRAY_SIZE(samples) - 1; i++) {
-		step = smb5_cc_next(&t, true, samples[i],
+		step = smb5_cc_next(&t, 0, true, samples[i],
 				    1000 + (i + 1) * SMB5_CC_SETTLE);
 		smb5_expect_hold(test, step);
 		KUNIT_EXPECT_EQ(test, step.recheck, SMB5_CC_SETTLE);
 	}
-	step = smb5_cc_next(&t, true, samples[i], 1000 + (i + 1) * SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, samples[i], 1000 + (i + 1) * SMB5_CC_SETTLE);
 	KUNIT_EXPECT_FALSE(test, step.hold);
 	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_DEFAULT);
 	KUNIT_EXPECT_EQ_MSG(test, step.recheck, 0UL, "bounded number of samples");
@@ -311,10 +311,79 @@ static void smb5_cc_resume_test(struct kunit *test)
 	struct smb5_cc_step step;
 
 	smb5_cc_restart(&t, 9000);
-	step = smb5_cc_next(&t, true, &smb5_cc_3p0, 9000);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, 9000);
 	KUNIT_EXPECT_FALSE(test, step.replugged);
 	smb5_expect_hold(test, step);
 	KUNIT_EXPECT_EQ(test, step.recheck, SMB5_CC_SETTLE);
+}
+
+/*
+ * A plug edge was counted in hard IRQ context before the pass, and its IRQ
+ * thread has not run: the same orientation and Rp neither keep the old
+ * classification nor complete a pending one.
+ */
+static void smb5_cc_edge_before_pass_test(struct kunit *test)
+{
+	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, 1000);
+	struct smb5_cc_step step;
+
+	step = smb5_cc_next(&t, 2, true, &smb5_cc_3p0, 4000);
+	KUNIT_EXPECT_TRUE(test, step.replugged);
+	smb5_expect_hold(test, step);
+
+	step = smb5_cc_next(&t, 2, true, &smb5_cc_3p0, 4000 + SMB5_CC_SETTLE);
+	KUNIT_ASSERT_EQ(test, t.state, SMB5_CC_SAMPLED);
+	step = smb5_cc_next(&t, 3, true, &smb5_cc_3p0, 4000 + 2 * SMB5_CC_SETTLE);
+	KUNIT_EXPECT_TRUE(test, step.replugged);
+	smb5_expect_hold(test, step);
+
+	smb5_cc_next(&t, 3, true, &smb5_cc_3p0, 4000 + 3 * SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 3, true, &smb5_cc_3p0, 4000 + 4 * SMB5_CC_SETTLE);
+	KUNIT_EXPECT_FALSE(test, step.hold);
+	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_3P0);
+}
+
+/* A plug edge counted while a pass wrote a limit above 500 mA voids that limit. */
+static void smb5_cc_edge_during_pass_test(struct kunit *test)
+{
+	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, 1000);
+	struct smb5_cc_step step;
+
+	KUNIT_EXPECT_TRUE(test, smb5_cc_still_valid(&t, 0));
+	KUNIT_EXPECT_EQ(test, t.state, SMB5_CC_CLASSIFIED);
+
+	KUNIT_EXPECT_FALSE(test, smb5_cc_still_valid(&t, 1));
+	KUNIT_EXPECT_EQ(test, t.state, SMB5_CC_DETACHED);
+	step = smb5_cc_next(&t, 1, true, &smb5_cc_3p0, 4000);
+	KUNIT_EXPECT_TRUE(test, step.replugged);
+	smb5_expect_hold(test, step);
+}
+
+/* After a failed write nothing above 500 mA, until a 500 mA write succeeds. */
+static void smb5_cc_icl_unconfirmed_test(struct kunit *test)
+{
+	struct smb5_cc_track t = smb5_classified(test, &smb5_cc_3p0, 1000);
+	struct smb5_cc_step step;
+	unsigned long now = 4000;
+	int i;
+
+	smb5_cc_icl_written(&t, 500000, -EIO);
+	for (i = 0; i < 6; i++, now += SMB5_CC_SETTLE) {
+		step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, now);
+		smb5_expect_hold(test, step);
+		KUNIT_EXPECT_FALSE(test, step.replugged);
+		KUNIT_EXPECT_EQ_MSG(test, step.recheck, SMB5_CC_SETTLE, "retry");
+	}
+
+	smb5_cc_icl_written(&t, 3000000, 0);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, now);
+	smb5_expect_hold(test, step);
+
+	smb5_cc_icl_written(&t, 500000, 0);
+	smb5_cc_next(&t, 0, true, &smb5_cc_3p0, now + SMB5_CC_SETTLE);
+	step = smb5_cc_next(&t, 0, true, &smb5_cc_3p0, now + 2 * SMB5_CC_SETTLE);
+	KUNIT_EXPECT_FALSE(test, step.hold);
+	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_3P0);
 }
 
 static struct kunit_case smb5_charger_test_cases[] = {
@@ -330,6 +399,9 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_cc_hardware_change_test),
 	KUNIT_CASE(smb5_cc_unstable_test),
 	KUNIT_CASE(smb5_cc_resume_test),
+	KUNIT_CASE(smb5_cc_edge_before_pass_test),
+	KUNIT_CASE(smb5_cc_edge_during_pass_test),
+	KUNIT_CASE(smb5_cc_icl_unconfirmed_test),
 	{}
 };
 

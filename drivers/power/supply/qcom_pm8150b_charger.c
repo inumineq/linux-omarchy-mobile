@@ -395,6 +395,8 @@ struct smb5_cc_track {
 	enum smb5_cc_state state;
 	unsigned long since;	/* jiffies of the attach or the last sample */
 	unsigned int samples;
+	unsigned int gen;	/* plug edge count this classification began in */
+	bool icl_unconfirmed;	/* a write failed: the PMIC may hold any limit */
 	struct smb5_cc cc;	/* last sample, or the classified one */
 };
 
@@ -426,6 +428,7 @@ struct smb5_register {
  * @chg_psy:		Charger power supply instance
  * @cc:			Type-C classification of the source without TCPM
  * @cc_paused:		System sleep: no timed passes of the status work
+ * @plug_gen:		Plug edges counted in hard IRQ context
  */
 struct smb5_chip {
 	struct device *dev;
@@ -452,6 +455,7 @@ struct smb5_chip {
 	enum power_supply_usb_type usb_type;
 	struct smb5_cc_track cc;
 	bool cc_paused;
+	atomic_t plug_gen;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -633,13 +637,15 @@ static void smb5_cc_restart(struct smb5_cc_track *t, unsigned long now)
 }
 
 /*
- * One pass of the Type-C classification. A plug edge resets the track to
- * SMB5_CC_DETACHED under the chip lock, so a pass never classifies an
- * attach it has not seen settle. Without a plug edge, a changed CC
- * orientation still means a new attach, and any other change of a
- * classified sample restarts the classification.
+ * One pass of the Type-C classification. @gen is the plug edge count read
+ * before the pass sampled the hardware; an edge since the classification
+ * began is a new attach, even before its IRQ thread has run. A changed CC
+ * orientation is a new attach too, and any other change of a classified
+ * sample restarts the classification. While the input limit is
+ * unconfirmed, every pass restarts it.
  */
-static struct smb5_cc_step smb5_cc_next(struct smb5_cc_track *t, bool online,
+static struct smb5_cc_step smb5_cc_next(struct smb5_cc_track *t,
+					unsigned int gen, bool online,
 					const struct smb5_cc *cc,
 					unsigned long now)
 {
@@ -652,12 +658,14 @@ static struct smb5_cc_step smb5_cc_next(struct smb5_cc_track *t, bool online,
 		return step;
 	}
 
-	if (t->state == SMB5_CC_DETACHED ||
+	if (t->state == SMB5_CC_DETACHED || t->gen != gen ||
 	    (sampled && t->cc.attached && cc->attached &&
 	     t->cc.flipped != cc->flipped)) {
 		step.replugged = true;
+		t->gen = gen;
 		smb5_cc_restart(t, now);
-	} else if (t->state == SMB5_CC_CLASSIFIED && !smb5_cc_equal(&t->cc, cc)) {
+	} else if (t->icl_unconfirmed ||
+		   (t->state == SMB5_CC_CLASSIFIED && !smb5_cc_equal(&t->cc, cc))) {
 		smb5_cc_restart(t, now);
 	}
 
@@ -691,6 +699,27 @@ static struct smb5_cc_step smb5_cc_next(struct smb5_cc_track *t, bool online,
 	t->state = SMB5_CC_SAMPLED;
 	step.recheck = SMB5_CC_SETTLE;
 	return step;
+}
+
+/*
+ * Called after a limit above 500 mA was written: it stands only if no plug
+ * edge was counted since the pass read @gen.
+ */
+static bool smb5_cc_still_valid(struct smb5_cc_track *t, unsigned int gen)
+{
+	if (t->gen == gen)
+		return true;
+	t->state = SMB5_CC_DETACHED;
+	return false;
+}
+
+/* Only a successful write of at most 500 mA confirms the input limit. */
+static void smb5_cc_icl_written(struct smb5_cc_track *t, unsigned int ua, int rc)
+{
+	if (rc)
+		t->icl_unconfirmed = true;
+	else if (ua <= SDP_CURRENT_UA)
+		t->icl_unconfirmed = false;
 }
 
 /*
@@ -912,6 +941,7 @@ static void smb5_status_change_work(struct work_struct *work)
 	bool apsd = false, start_apsd = false, retry = false;
 	struct smb5_cc_step cc_step = { .rp = SMB5_RP_DEFAULT };
 	struct smb5_input_limit limit;
+	unsigned int gen, icl;
 	unsigned long delay;
 	struct smb5_cc cc;
 
@@ -956,13 +986,14 @@ static void smb5_status_change_work(struct work_struct *work)
 			goto apply;
 		}
 	} else {
+		gen = atomic_read_acquire(&chip->plug_gen);
 		ret = smb5_get_prop_usb_online(chip, &online);
 		if (ret)
 			goto fail;
 		ret = smb5_read_cc(chip, &cc);
 		if (ret)
 			goto fail;
-		cc_step = smb5_cc_next(&chip->cc, online, &cc, jiffies);
+		cc_step = smb5_cc_next(&chip->cc, gen, online, &cc, jiffies);
 		if (cc_step.replugged) {
 			/* A new attach that no plug interrupt reported */
 			chip->apsd_started = false;
@@ -1022,10 +1053,25 @@ apply:
 		current_ua = SDP_CURRENT_UA;
 	}
 	chip->source_current_limit = clamp(current_ua, 0, CURRENT_MAX_UA);
-	ret = smb5_apply_input_limit(chip,
-		min(chip->source_current_limit, chip->user_current_limit), apsd);
+	icl = min(chip->source_current_limit, chip->user_current_limit);
+	ret = smb5_apply_input_limit(chip, icl, apsd);
+	smb5_cc_icl_written(&chip->cc, icl, ret);
 	if (ret)
 		goto fail;
+	if (!chip->has_tcpm && icl > SDP_CURRENT_UA) {
+		/* The edge count must be read after the write has completed. */
+		smp_mb();
+		if (!smb5_cc_still_valid(&chip->cc, atomic_read(&chip->plug_gen))) {
+			/* The IRQ thread of that edge queues the next pass. */
+			icl = min(SDP_CURRENT_UA, chip->user_current_limit);
+			chip->source_current_limit = SDP_CURRENT_UA;
+			ret = smb5_set_current_limit(chip, icl, false);
+			smb5_cc_icl_written(&chip->cc, icl, ret);
+			if (ret)
+				goto fail;
+			type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+		}
+	}
 	if (start_apsd) {
 		/* Detection must be enabled before requesting a fresh measurement. */
 		ret = regmap_update_bits(chip->regmap, chip->base + CMD_APSD,
@@ -1055,9 +1101,9 @@ fail:
 	if (smb5_sink_vbus_present(chip)) {
 		/* Keep pSnkStdby so a flat battery is not left to carry the system. */
 		chip->source_current_limit = SDP_CURRENT_UA;
-		smb5_apply_input_limit(chip,
-			min(chip->source_current_limit, chip->user_current_limit),
-			false);
+		icl = min(chip->source_current_limit, chip->user_current_limit);
+		smb5_cc_icl_written(&chip->cc, icl,
+				    smb5_apply_input_limit(chip, icl, false));
 	} else {
 		chip->source_current_limit = 0;
 		regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
@@ -1558,9 +1604,23 @@ static irqreturn_t smb5_handle_batt_overvoltage(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Hard IRQ context: a status pass that is running or about to run sees the
+ * edge without waiting for the thread, which may be blocked on chip->lock.
+ */
+static irqreturn_t smb5_usb_plugin_edge(int irq, void *data)
+{
+	struct smb5_chip *chip = data;
+
+	atomic_inc(&chip->plug_gen);
+	return IRQ_WAKE_THREAD;
+}
+
 static irqreturn_t smb5_handle_usb_plugin(int irq, void *data)
 {
 	struct smb5_chip *chip = data;
+	unsigned int icl;
+	int rc;
 
 	/* Keep a quick detach/reattach from reusing the last cable's result. */
 	mutex_lock(&chip->lock);
@@ -1569,11 +1629,16 @@ static irqreturn_t smb5_handle_usb_plugin(int irq, void *data)
 	if (!chip->has_tcpm) {
 		/* From here until a classification of the new attach: 500 mA. */
 		chip->cc.state = SMB5_CC_DETACHED;
-		if (chip->ready && chip->source_current_limit > SDP_CURRENT_UA) {
+		if (chip->ready && (chip->source_current_limit > SDP_CURRENT_UA ||
+				    chip->cc.icl_unconfirmed)) {
 			chip->source_current_limit = SDP_CURRENT_UA;
-			smb5_set_current_limit(chip, min(SDP_CURRENT_UA,
-							 chip->user_current_limit),
-					       false);
+			icl = min(SDP_CURRENT_UA, chip->user_current_limit);
+			rc = smb5_set_current_limit(chip, icl, false);
+			smb5_cc_icl_written(&chip->cc, icl, rc);
+			if (rc)
+				dev_err_ratelimited(chip->dev,
+						    "Couldn't lower the input limit on plug: %d\n",
+						    rc);
 		}
 	}
 	if (chip->ready)
@@ -1873,10 +1938,14 @@ static int smb5_probe(struct platform_device *pdev)
 	if (rc < 0)
 		return rc;
 
-	rc = smb5_init_irq(chip, &chip->cable_irq, "usbin-plugin",
-			   smb5_handle_usb_plugin);
-	if (rc < 0)
-		return rc;
+	chip->cable_irq = platform_get_irq_byname(pdev, "usbin-plugin");
+	if (chip->cable_irq < 0)
+		return chip->cable_irq;
+	rc = devm_request_threaded_irq(chip->dev, chip->cable_irq,
+				       smb5_usb_plugin_edge, smb5_handle_usb_plugin,
+				       IRQF_ONESHOT, "usbin-plugin", chip);
+	if (rc)
+		return dev_err_probe(chip->dev, rc, "Couldn't request irq usbin-plugin\n");
 
 	rc = smb5_init_irq(chip, &irq, "usbin-icl-change",
 			   smb5_handle_usb_icl_change);
