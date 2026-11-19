@@ -803,7 +803,9 @@ static inline int smb5_get_current_limit(struct smb5_chip *chip,
 	return rc;
 }
 
-static int smb5_set_current_limit(struct smb5_chip *chip, unsigned int val)
+/* Unless forced, the register is written only when its value changes. */
+static int smb5_set_current_limit(struct smb5_chip *chip, unsigned int val,
+				  bool force)
 {
 	unsigned char val_raw;
 
@@ -811,8 +813,11 @@ static int smb5_set_current_limit(struct smb5_chip *chip, unsigned int val)
 		return -EINVAL;
 	val_raw = val / CURRENT_SCALE_FACTOR;
 
-	return regmap_write(chip->regmap, chip->base + USBIN_CURRENT_LIMIT_CFG,
-		val_raw);
+	if (force)
+		return regmap_write(chip->regmap,
+				    chip->base + USBIN_CURRENT_LIMIT_CFG, val_raw);
+	return regmap_update_bits(chip->regmap, chip->base + USBIN_CURRENT_LIMIT_CFG,
+				  USBIN_CURRENT_LIMIT_MASK, val_raw);
 }
 
 static int smb5_set_charge_current(struct smb5_chip *chip, int current_ua)
@@ -872,7 +877,7 @@ static int smb5_apply_input_limit(struct smb5_chip *chip, unsigned int current_u
 			return ret;
 	}
 
-	ret = smb5_set_current_limit(chip, current_ua);
+	ret = smb5_set_current_limit(chip, current_ua, chip->has_tcpm);
 	if (ret)
 		return ret;
 	ret = regmap_update_bits(chip->regmap, chip->base + USBIN_OPTIONS_1_CFG,
@@ -1382,7 +1387,7 @@ static void smb5_stop(void *data)
 	 * sequence does; with USBIN suspended, a phone left on the cable
 	 * would drain its battery.
 	 */
-	smb5_set_current_limit(chip, SDP_CURRENT_UA);
+	smb5_set_current_limit(chip, SDP_CURRENT_UA, true);
 	regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
 			   USBIN_SUSPEND_BIT, 0);
 }
@@ -1567,7 +1572,8 @@ static irqreturn_t smb5_handle_usb_plugin(int irq, void *data)
 		if (chip->ready && chip->source_current_limit > SDP_CURRENT_UA) {
 			chip->source_current_limit = SDP_CURRENT_UA;
 			smb5_set_current_limit(chip, min(SDP_CURRENT_UA,
-							 chip->user_current_limit));
+							 chip->user_current_limit),
+					       false);
 		}
 	}
 	if (chip->ready)
