@@ -360,6 +360,10 @@ static const struct smb5_temp_zone smb5_zones[] = {
 #define POLICY_REST_MARGIN_UV		35000
 /* Not in stock: stop at once this far above the over-voltage limit */
 #define POLICY_HARD_STOP_UV		15000
+/* Charge limit: 100 % is off; charging resumes this many points below it */
+#define POLICY_LIMIT_OFF		100
+#define POLICY_LIMIT_MIN		50
+#define POLICY_LIMIT_HYST		5
 
 /* Current advertised by a Type-C source through its Rp pull-up */
 enum smb5_rp {
@@ -429,6 +433,9 @@ struct smb5_register {
  * @cc:			Type-C classification of the source without TCPM
  * @cc_paused:		System sleep: no timed passes of the status work
  * @plug_gen:		Plug edges counted in hard IRQ context
+ * @charge_end:		Charge limit in percent of the gauge capacity
+ * @limit_held:		Last known side of the limit's hysteresis band
+ * @limit_hold:		The charge limit keeps charging off
  */
 struct smb5_chip {
 	struct device *dev;
@@ -468,6 +475,9 @@ struct smb5_chip {
 	bool user_charge_enable;
 	bool policy_charge_enable;
 	bool batt_full;
+	int charge_end;
+	bool limit_held;
+	bool limit_hold;
 	int zone;
 	int fv_set_uv;
 	int sw_full_count;
@@ -489,6 +499,8 @@ static enum power_supply_property smb5_properties[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_CHARGING_ENABLED,
+	/* Last: boards without the charging policy leave it out. */
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
 };
 
 static int smb5_get_prop_usb_online(struct smb5_chip *chip, int *val)
@@ -1126,11 +1138,42 @@ static int smb5_set_float_voltage(struct smb5_chip *chip, int fv_uv)
 				  (fv_uv - FLOAT_VOLTAGE_MIN_UV) / FLOAT_VOLTAGE_STEP_UV);
 }
 
+/*
+ * Charge limit: charging stops at @end and resumes POLICY_LIMIT_HYST points
+ * below it. @held keeps the side of that band the battery was last seen on.
+ * A capacity the gauge cannot report leaves @held alone and holds charging
+ * off: the limit may only ever take charging away.
+ */
+static bool smb5_limit_hold(bool *held, int end, int capacity)
+{
+	if (end >= POLICY_LIMIT_OFF) {
+		*held = false;
+		return false;
+	}
+	if (capacity < 0 || capacity > 100)
+		return true;
+	if (capacity >= end)
+		*held = true;
+	else if (capacity + POLICY_LIMIT_HYST <= end)
+		*held = false;
+	return *held;
+}
+
+/* The policy's reasons to charge or not, except system sleep. */
+static bool smb5_charge_wanted(const struct smb5_chip *chip)
+{
+	return chip->user_charge_enable && chip->policy_charge_enable &&
+	       !chip->limit_hold;
+}
+
+static bool smb5_charge_enable(const struct smb5_chip *chip)
+{
+	return smb5_charge_wanted(chip) && !chip->suspended;
+}
+
 static void smb5_apply_charge_enable(struct smb5_chip *chip)
 {
-	smb5_set_prop_charging_enabled(chip, chip->user_charge_enable &&
-					     chip->policy_charge_enable &&
-					     !chip->suspended);
+	smb5_set_prop_charging_enabled(chip, smb5_charge_enable(chip));
 }
 
 static int smb5_gauge_read(struct smb5_chip *chip, enum power_supply_property psp,
@@ -1143,6 +1186,22 @@ static int smb5_gauge_read(struct smb5_chip *chip, enum power_supply_property ps
 	if (!ret)
 		*val = pval.intval;
 	return ret;
+}
+
+static void smb5_limit_update(struct smb5_chip *chip)
+{
+	int capacity = -ENODATA;
+	bool hold;
+
+	if (chip->charge_end < POLICY_LIMIT_OFF && chip->gauge)
+		smb5_gauge_read(chip, POWER_SUPPLY_PROP_CAPACITY, &capacity);
+	hold = smb5_limit_hold(&chip->limit_held, chip->charge_end, capacity);
+	if (hold != chip->limit_hold)
+		dev_info_ratelimited(chip->dev,
+				     "charge limit %d %%, battery at %d %%: %s\n",
+				     chip->charge_end, capacity,
+				     hold ? "not charging" : "charging allowed");
+	chip->limit_hold = hold;
 }
 
 static int smb5_zone_for_temp(int temp)
@@ -1258,6 +1317,8 @@ static void smb5_policy_work(struct work_struct *work)
 				 chip->gauge->desc->name);
 	}
 
+	smb5_limit_update(chip);
+
 	if (!chip->gauge ||
 	    smb5_gauge_read(chip, POWER_SUPPLY_PROP_TEMP, &temp) ||
 	    smb5_gauge_read(chip, POWER_SUPPLY_PROP_VOLTAGE_NOW, &vbat) ||
@@ -1353,8 +1414,7 @@ static void smb5_policy_work(struct work_struct *work)
 	 * and is restarted, as stock does, or the cell has reached the level
 	 * at which nothing more is charged and counts as full.
 	 */
-	if (chip->policy_charge_enable && chip->user_charge_enable &&
-	    ibat <= POLICY_ITERM_UA / 2) {
+	if (smb5_charge_wanted(chip) && ibat <= POLICY_ITERM_UA / 2) {
 		if (vbat > z->full_uv - POLICY_REST_MARGIN_UV) {
 			if (++chip->rest_count > 2 * POLICY_SW_FULL_COUNT) {
 				chip->batt_full = true;
@@ -1379,8 +1439,7 @@ static void smb5_policy_work(struct work_struct *work)
 apply:
 	smb5_apply_charge_enable(chip);
 	smb5_get_prop_usb_online(chip, &online);
-	WRITE_ONCE(chip->charging, online && chip->policy_charge_enable &&
-				   chip->user_charge_enable);
+	WRITE_ONCE(chip->charging, online && smb5_charge_wanted(chip));
 
 	/*
 	 * Only this work pets the charger watchdog. If it stops running, the
@@ -1540,6 +1599,9 @@ static int smb5_get_property(struct power_supply *psy,
 		return 0;
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 		return smb5_get_prop_charging_enabled(chip, &val->intval);
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+		val->intval = READ_ONCE(chip->charge_end);
+		return 0;
 	default:
 		dev_err(chip->dev, "invalid property: %d\n", psp);
 		return -EINVAL;
@@ -1568,6 +1630,16 @@ static int smb5_set_property(struct power_supply *psy,
 		chip->user_charge_enable = !!val->intval;
 		smb5_apply_charge_enable(chip);
 		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+		if (val->intval < 0 || val->intval > POLICY_LIMIT_OFF)
+			return -EINVAL;
+		/* A new limit charges up to it from wherever the battery is. */
+		WRITE_ONCE(chip->charge_end, max(val->intval, POLICY_LIMIT_MIN));
+		chip->limit_held = false;
+		smb5_limit_update(chip);
+		smb5_apply_charge_enable(chip);
+		mod_delayed_work(system_wq, &chip->policy_work, 0);
+		return 0;
 	default:
 		dev_err(chip->dev, "No setter for property: %d\n", psp);
 		return -EINVAL;
@@ -1581,6 +1653,7 @@ static int smb5_property_is_writable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
 		return 1;
 	default:
 		return 0;
@@ -1822,7 +1895,9 @@ static int smb5_probe(struct platform_device *pdev)
 	chip->name = pdev->name;
 	mutex_init(&chip->lock);
 	chip->has_tcpm = device_property_present(chip->dev, "power-supplies");
+	chip->policy = device_property_present(chip->dev, "qcom,fuel-gauge");
 	chip->user_current_limit = CURRENT_MAX_UA;
+	chip->charge_end = POLICY_LIMIT_OFF;
 
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap)
@@ -1856,6 +1931,9 @@ static int smb5_probe(struct platform_device *pdev)
 	if (!desc)
 		return -ENOMEM;
 	memcpy(desc, &smb5_psy_desc, sizeof(smb5_psy_desc));
+	/* The charge limit needs the fuel gauge's capacity. */
+	if (!chip->policy)
+		desc->num_properties--;
 	desc->name =
 		devm_kasprintf(chip->dev, GFP_KERNEL, "%s-charger",
 			       (const char *)device_get_match_data(chip->dev));
@@ -1875,7 +1953,6 @@ static int smb5_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&chip->status_change_work, smb5_status_change_work);
 	INIT_DELAYED_WORK(&chip->policy_work, smb5_policy_work);
-	chip->policy = device_property_present(chip->dev, "qcom,fuel-gauge");
 	chip->user_charge_enable = true;
 	chip->policy_charge_enable = true;
 	chip->zone = ZONE_NONE;

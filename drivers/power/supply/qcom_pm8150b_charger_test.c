@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * KUnit tests for the PM8150B charger input current limit. Included by
- * qcom_pm8150b_charger.c, so the tested helpers can stay static.
+ * KUnit tests for the PM8150B charger input current limit and charge limit.
+ * Included by qcom_pm8150b_charger.c, so the tested helpers can stay static.
  */
 
 #include <kunit/test.h>
@@ -386,6 +386,90 @@ static void smb5_cc_icl_unconfirmed_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, step.rp, SMB5_RP_3P0);
 }
 
+struct smb5_limit_case {
+	const char *desc;
+	bool held;
+	int end;
+	int capacity;
+	bool hold;
+	bool held_after;
+};
+
+static const struct smb5_limit_case smb5_limit_cases[] = {
+	{ "off at 100", false, 100, 100, false, false },
+	{ "off clears held", true, 100, 90, false, false },
+	{ "off ignores no capacity", false, 100, -ENODATA, false, false },
+	{ "below end", false, 80, 79, false, false },
+	{ "at end", false, 80, 80, true, true },
+	{ "above end", false, 80, 95, true, true },
+	{ "in band, rising", false, 80, 76, false, false },
+	{ "in band, held", true, 80, 79, true, true },
+	{ "band edge, held", true, 80, 76, true, true },
+	{ "release, held", true, 80, 75, false, false },
+	{ "below band", false, 80, 40, false, false },
+	{ "no capacity", false, 80, -ENODATA, true, false },
+	{ "no capacity, held", true, 80, -EIO, true, true },
+	{ "capacity above 100", false, 80, 101, true, false },
+	{ "lowest end", false, 50, 50, true, true },
+	{ "empty, lowest end", false, 50, 0, false, false },
+};
+
+static void smb5_limit_case_desc(const struct smb5_limit_case *c, char *desc)
+{
+	strscpy(desc, c->desc, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(smb5_limit, smb5_limit_cases, smb5_limit_case_desc);
+
+static void smb5_limit_hold_test(struct kunit *test)
+{
+	const struct smb5_limit_case *c = test->param_value;
+	bool held = c->held;
+
+	KUNIT_EXPECT_EQ(test, smb5_limit_hold(&held, c->end, c->capacity), c->hold);
+	KUNIT_EXPECT_EQ(test, held, c->held_after);
+}
+
+/* A run at an 80 % limit: one stop, one restart, a gauge glitch in between. */
+static void smb5_limit_cycle_test(struct kunit *test)
+{
+	static const struct {
+		int capacity;
+		bool hold;
+	} run[] = {
+		{ 78, false }, { 79, false }, { 80, true }, { 79, true },
+		{ -EIO, true }, { 77, true }, { 76, true }, { 75, false },
+		{ 76, false }, { -EIO, true }, { 77, false }, { 80, true },
+	};
+	bool held = false;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(run); i++)
+		KUNIT_EXPECT_EQ_MSG(test, smb5_limit_hold(&held, 80, run[i].capacity),
+				    run[i].hold, "step %d, capacity %d", i, run[i].capacity);
+}
+
+/* The limit is one more reason not to charge; it never enables charging. */
+static void smb5_charge_enable_test(struct kunit *test)
+{
+	struct smb5_chip *chip = kunit_kzalloc(test, sizeof(*chip), GFP_KERNEL);
+	unsigned int bits;
+
+	KUNIT_ASSERT_NOT_NULL(test, chip);
+	for (bits = 0; bits < 16; bits++) {
+		chip->user_charge_enable = bits & 1;
+		chip->policy_charge_enable = bits & 2;
+		chip->limit_hold = bits & 4;
+		chip->suspended = bits & 8;
+		KUNIT_EXPECT_EQ_MSG(test, smb5_charge_enable(chip), bits == 3,
+				    "user %d policy %d limit %d suspended %d",
+				    !!(bits & 1), !!(bits & 2), !!(bits & 4), !!(bits & 8));
+		KUNIT_EXPECT_EQ_MSG(test, smb5_charge_wanted(chip), bits % 8 == 3,
+				    "user %d policy %d limit %d",
+				    !!(bits & 1), !!(bits & 2), !!(bits & 4));
+	}
+}
+
 static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE_PARAM(smb5_input_limit_test, smb5_input_gen_params),
 	KUNIT_CASE(smb5_rp_from_snk_status_test),
@@ -402,6 +486,9 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_cc_edge_before_pass_test),
 	KUNIT_CASE(smb5_cc_edge_during_pass_test),
 	KUNIT_CASE(smb5_cc_icl_unconfirmed_test),
+	KUNIT_CASE_PARAM(smb5_limit_hold_test, smb5_limit_gen_params),
+	KUNIT_CASE(smb5_limit_cycle_test),
+	KUNIT_CASE(smb5_charge_enable_test),
 	{}
 };
 
