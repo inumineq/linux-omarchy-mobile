@@ -288,6 +288,11 @@
 #define CURRENT_SCALE_FACTOR		50000
 /* clang-format on */
 
+static unsigned int max_input_ua;
+module_param(max_input_ua, uint, 0444);
+MODULE_PARM_DESC(max_input_ua,
+		 "Ceiling on the USB input current limit in uA, 0 for none (min 500000)");
+
 /* BATTERY_CHARGER_STATUS_1 charger states, as in the vendor smb5 headers. */
 enum charger_status {
 	INHIBIT_CHARGE = 0,
@@ -429,6 +434,7 @@ struct smb5_register {
  * @cc:			Type-C classification of the source without TCPM
  * @cc_paused:		System sleep: no timed passes of the status work
  * @plug_gen:		Plug edges counted in hard IRQ context
+ * @input_ceiling_ua:	No input limit above this is written (max_input_ua)
  */
 struct smb5_chip {
 	struct device *dev;
@@ -456,6 +462,7 @@ struct smb5_chip {
 	struct smb5_cc_track cc;
 	bool cc_paused;
 	atomic_t plug_gen;
+	unsigned int input_ceiling_ua;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -723,12 +730,25 @@ static void smb5_cc_icl_written(struct smb5_cc_track *t, unsigned int ua, int rc
 }
 
 /*
- * Input limit for a BC1.2 result and the Rp level of the source. Type-C
- * current of 1.5 A or 3 A takes precedence over BC1.2 where it is higher;
- * default Rp leaves the BC1.2 limit.
+ * Ceiling for a max_input_ua value, 0 meaning none. The driver holds
+ * 500 mA during attach and after unbind, so no ceiling goes below that.
+ */
+static unsigned int smb5_input_ceiling(unsigned int param_ua)
+{
+	if (!param_ua)
+		return CURRENT_MAX_UA;
+	param_ua = clamp_t(unsigned int, param_ua, SDP_CURRENT_UA, CURRENT_MAX_UA);
+	return rounddown(param_ua, CURRENT_SCALE_FACTOR);
+}
+
+/*
+ * Input limit for a BC1.2 result and the Rp level of the source, at most
+ * @ceiling_ua. Type-C current of 1.5 A or 3 A takes precedence over BC1.2
+ * where it is higher; default Rp leaves the BC1.2 limit.
  */
 static struct smb5_input_limit
-smb5_input_limit(enum power_supply_usb_type bc12, enum smb5_rp rp)
+smb5_input_limit(enum power_supply_usb_type bc12, enum smb5_rp rp,
+		 unsigned int ceiling_ua)
 {
 	struct smb5_input_limit limit = { SDP_CURRENT_UA, bc12 };
 	int rp_ua = 0;
@@ -747,6 +767,7 @@ smb5_input_limit(enum power_supply_usb_type bc12, enum smb5_rp rp)
 		limit.current_ua = rp_ua;
 		limit.type = POWER_SUPPLY_USB_TYPE_C;
 	}
+	limit.current_ua = min_t(unsigned int, limit.current_ua, ceiling_ua);
 
 	return limit;
 }
@@ -840,6 +861,8 @@ static int smb5_set_current_limit(struct smb5_chip *chip, unsigned int val,
 
 	if (val > CURRENT_MAX_UA)
 		return -EINVAL;
+	/* Every write of the input limit passes here. */
+	val = min(val, chip->input_ceiling_ua);
 	val_raw = val / CURRENT_SCALE_FACTOR;
 
 	if (force)
@@ -1027,9 +1050,10 @@ static void smb5_status_change_work(struct work_struct *work)
 	 * it, hold 500 mA until the Type-C state of this attach is classified.
 	 */
 	if (cc_step.hold && !chip->has_tcpm)
-		limit = smb5_input_limit(POWER_SUPPLY_USB_TYPE_UNKNOWN, SMB5_RP_DEFAULT);
+		limit = smb5_input_limit(POWER_SUPPLY_USB_TYPE_UNKNOWN, SMB5_RP_DEFAULT,
+					 chip->input_ceiling_ua);
 	else
-		limit = smb5_input_limit(type, cc_step.rp);
+		limit = smb5_input_limit(type, cc_step.rp, chip->input_ceiling_ua);
 	current_ua = limit.current_ua;
 	type = limit.type;
 
@@ -1052,7 +1076,7 @@ apply:
 			SDP_CURRENT_UA);
 		current_ua = SDP_CURRENT_UA;
 	}
-	chip->source_current_limit = clamp(current_ua, 0, CURRENT_MAX_UA);
+	chip->source_current_limit = clamp_t(int, current_ua, 0, chip->input_ceiling_ua);
 	icl = min(chip->source_current_limit, chip->user_current_limit);
 	ret = smb5_apply_input_limit(chip, icl, apsd);
 	smb5_cc_icl_written(&chip->cc, icl, ret);
@@ -1823,6 +1847,13 @@ static int smb5_probe(struct platform_device *pdev)
 	mutex_init(&chip->lock);
 	chip->has_tcpm = device_property_present(chip->dev, "power-supplies");
 	chip->user_current_limit = CURRENT_MAX_UA;
+	chip->input_ceiling_ua = smb5_input_ceiling(max_input_ua);
+	if (max_input_ua && max_input_ua < SDP_CURRENT_UA)
+		dev_warn(chip->dev, "max_input_ua %u is below %d, using %d\n",
+			 max_input_ua, SDP_CURRENT_UA, SDP_CURRENT_UA);
+	if (max_input_ua)
+		dev_info(chip->dev, "input current ceiling %u uA\n",
+			 chip->input_ceiling_ua);
 
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap)
