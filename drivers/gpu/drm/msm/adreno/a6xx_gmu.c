@@ -5,6 +5,7 @@
 #include <linux/clk.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/interconnect.h>
+#include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
@@ -2497,3 +2498,43 @@ err_put_device:
 
 	return ret;
 }
+
+/*
+ * The GMU is a separate DT/platform device (a child of the SoC bus), but no
+ * driver ever binds to it: the Adreno GPU driver looks it up with
+ * of_find_device_by_node() in a6xx_gmu_init() and programs it directly.
+ * Under fw_devlink strict sync_state that leaves the GMU's managed consumer
+ * links (clocks, power-domains, iommus) permanently non-ACTIVE, so suppliers
+ * such as gcc-sm8250 and sm8250-gpucc never receive their sync_state()
+ * callback and keep their initial votes ("sync_state() pending due to
+ * 3d6a000.gmu").  Bind the GMU device to a minimal platform driver so that
+ * device_links_driver_bound() marks its supplier links ACTIVE.  All actual
+ * GMU handling stays in this file, driven by the Adreno GPU driver.
+ */
+static int adreno_gmu_device_probe(struct platform_device *pdev)
+{
+	/* The Adreno GPU driver drives the GMU; nothing to do here. */
+	return 0;
+}
+
+static void adreno_gmu_device_remove(struct platform_device *pdev)
+{
+}
+
+static const struct of_device_id adreno_gmu_device_of_match[] = {
+	{ .compatible = "qcom,adreno-gmu" },
+	{ .compatible = "qcom,adreno-gmu-wrapper" },
+	{ .compatible = "qcom,adreno-rgmu" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, adreno_gmu_device_of_match);
+
+static struct platform_driver adreno_gmu_device_driver = {
+	.probe = adreno_gmu_device_probe,
+	.remove = adreno_gmu_device_remove,
+	.driver = {
+		.name = "adreno-gmu",
+		.of_match_table = adreno_gmu_device_of_match,
+	},
+};
+module_platform_driver(adreno_gmu_device_driver);
