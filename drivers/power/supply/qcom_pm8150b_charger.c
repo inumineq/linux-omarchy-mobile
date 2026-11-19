@@ -364,6 +364,8 @@ static const struct smb5_temp_zone smb5_zones[] = {
 #define POLICY_LIMIT_OFF		100
 #define POLICY_LIMIT_MIN		50
 #define POLICY_LIMIT_HYST		5
+/* Failed charge enable writes in a row before a cable edge counts as handled */
+#define POLICY_APPLY_TRIES		3
 
 /* Current advertised by a Type-C source through its Rp pull-up */
 enum smb5_rp {
@@ -432,7 +434,8 @@ struct smb5_register {
  * @cc:			Type-C classification of the source without TCPM
  * @cc_paused:		System sleep: no timed passes of the status work
  * @plug_gen:		Plug edges counted in hard IRQ context
- * @policy_gen:		@plug_gen as the last charging policy pass read it
+ * @policy_gen:		@plug_gen as read by the last policy pass that applied its decision
+ * @apply_fails:	Policy passes in a row whose charge enable write failed
  * @charge_end:		Charge limit in percent of the gauge capacity
  * @limit_held:		Last known side of the limit's hysteresis band
  * @limit_hold:		The charge limit keeps charging off
@@ -463,6 +466,7 @@ struct smb5_chip {
 	bool cc_paused;
 	atomic_t plug_gen;
 	unsigned int policy_gen;
+	unsigned int apply_fails;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -1176,9 +1180,25 @@ static bool smb5_charge_enable(const struct smb5_chip *chip)
 	return smb5_charge_wanted(chip) && !chip->suspended;
 }
 
-static void smb5_apply_charge_enable(struct smb5_chip *chip)
+static int smb5_apply_charge_enable(struct smb5_chip *chip)
 {
-	smb5_set_prop_charging_enabled(chip, smb5_charge_enable(chip));
+	return smb5_set_prop_charging_enabled(chip, smb5_charge_enable(chip));
+}
+
+/*
+ * Mark the cable edges up to @gen as handled once the policy pass that read
+ * @gen has written its decision; @ret is that write's result. A write that
+ * keeps failing stops holding suspend back after POLICY_APPLY_TRIES passes:
+ * sleeping cannot make it worse, as suspend turns charging off.
+ */
+static void smb5_policy_settle(unsigned int *policy_gen, unsigned int *fails,
+			       unsigned int gen, int ret)
+{
+	if (ret && ++*fails < POLICY_APPLY_TRIES)
+		return;
+	*fails = 0;
+	/* Pairs with smb5_pm_notify(): @charging is written before @gen. */
+	smp_store_release(policy_gen, gen);
 }
 
 static int smb5_gauge_read(struct smb5_chip *chip, enum power_supply_property psp,
@@ -1304,14 +1324,14 @@ static void smb5_policy_work(struct work_struct *work)
 	struct smb5_chip *chip = container_of(work, struct smb5_chip,
 					     policy_work.work);
 	const struct smb5_temp_zone *z;
-	int temp, vbat, ibat, online = 0, zone, gauge_status;
-	unsigned int stat;
+	int temp, vbat, ibat, online = 0, zone, gauge_status, ret;
+	unsigned int stat, gen;
 	bool was_full, ovp = false;
 
 	mutex_lock(&chip->lock);
 	if (!chip->ready || chip->suspended)
 		goto unlock;
-	WRITE_ONCE(chip->policy_gen, atomic_read_acquire(&chip->plug_gen));
+	gen = atomic_read_acquire(&chip->plug_gen);
 
 	if (!chip->gauge) {
 		chip->gauge = power_supply_get_by_reference(dev_fwnode(chip->dev),
@@ -1443,9 +1463,12 @@ static void smb5_policy_work(struct work_struct *work)
 	}
 
 apply:
-	smb5_apply_charge_enable(chip);
+	ret = smb5_apply_charge_enable(chip);
 	smb5_get_prop_usb_online(chip, &online);
 	WRITE_ONCE(chip->charging, online && smb5_charge_wanted(chip));
+	if (ret)
+		dev_warn_ratelimited(chip->dev, "cannot set charging: %d\n", ret);
+	smb5_policy_settle(&chip->policy_gen, &chip->apply_fails, gen, ret);
 
 	/*
 	 * Only this work pets the charger watchdog. If it stops running, the
@@ -1468,16 +1491,21 @@ static int smb5_pm_notify(struct notifier_block *nb, unsigned long action,
 {
 	struct smb5_chip *chip = container_of(nb, struct smb5_chip, pm_nb);
 
-	if ((action == PM_SUSPEND_PREPARE || action == PM_HIBERNATION_PREPARE) &&
-	    READ_ONCE(chip->charging)) {
-		dev_info_ratelimited(chip->dev, "battery is charging, not suspending\n");
+	if (action != PM_SUSPEND_PREPARE && action != PM_HIBERNATION_PREPARE)
+		return NOTIFY_DONE;
+
+	/*
+	 * The policy has not yet applied a decision for a new cable. Pairs
+	 * with smb5_policy_settle(): once the generation is current, the
+	 * @charging read below is at least that pass's.
+	 */
+	if (smp_load_acquire(&chip->policy_gen) != atomic_read(&chip->plug_gen)) {
+		dev_info_ratelimited(chip->dev, "cable change pending, not suspending\n");
 		return notifier_from_errno(-EBUSY);
 	}
 
-	/* The policy has not yet decided whether to charge from a new cable. */
-	if ((action == PM_SUSPEND_PREPARE || action == PM_HIBERNATION_PREPARE) &&
-	    atomic_read(&chip->plug_gen) != READ_ONCE(chip->policy_gen)) {
-		dev_info_ratelimited(chip->dev, "cable change pending, not suspending\n");
+	if (READ_ONCE(chip->charging)) {
+		dev_info_ratelimited(chip->dev, "battery is charging, not suspending\n");
 		return notifier_from_errno(-EBUSY);
 	}
 

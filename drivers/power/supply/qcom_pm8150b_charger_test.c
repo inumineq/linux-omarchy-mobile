@@ -488,6 +488,33 @@ static void smb5_charge_enable_test(struct kunit *test)
 	}
 }
 
+/*
+ * A cable edge counts as handled only after a pass wrote its decision; a
+ * write that keeps failing gives up after three passes so suspend is not
+ * refused for good.
+ */
+static void smb5_policy_settle_test(struct kunit *test)
+{
+	static const struct {
+		unsigned int gen;
+		int ret;
+		unsigned int policy_gen;
+	} run[] = {
+		{ 2, -EIO, 1 }, { 3, -EIO, 1 }, { 3, -EIO, 3 },
+		{ 4, -EIO, 3 }, { 4, 0, 4 },
+		{ 5, -EIO, 4 }, { 5, -EIO, 4 }, { 6, 0, 6 },
+	};
+	unsigned int policy_gen = 1, fails = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(run); i++) {
+		smb5_policy_settle(&policy_gen, &fails, run[i].gen, run[i].ret);
+		KUNIT_EXPECT_EQ_MSG(test, policy_gen, run[i].policy_gen,
+				    "step %d, gen %u, write %d", i, run[i].gen, run[i].ret);
+	}
+	KUNIT_EXPECT_EQ(test, fails, 0);
+}
+
 static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE_PARAM(smb5_input_limit_test, smb5_input_gen_params),
 	KUNIT_CASE(smb5_rp_from_snk_status_test),
@@ -508,6 +535,7 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_limit_cycle_test),
 	KUNIT_CASE(smb5_limit_valid_test),
 	KUNIT_CASE(smb5_charge_enable_test),
+	KUNIT_CASE(smb5_policy_settle_test),
 	{}
 };
 
