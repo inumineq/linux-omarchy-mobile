@@ -48,7 +48,8 @@ KUNIT_ARRAY_PARAM(smb5_input, smb5_input_cases, smb5_input_case_desc);
 static void smb5_input_limit_test(struct kunit *test)
 {
 	const struct smb5_input_case *c = test->param_value;
-	struct smb5_input_limit limit = smb5_input_limit(c->bc12, c->rp);
+	struct smb5_input_limit limit = smb5_input_limit(c->bc12, c->rp,
+							 smb5_input_ceiling(0));
 
 	KUNIT_EXPECT_EQ(test, limit.current_ua, c->current_ua);
 	KUNIT_EXPECT_EQ(test, limit.type, c->type);
@@ -107,7 +108,8 @@ static void smb5_input_limit_bounds_test(struct kunit *test)
 	for (i = 0; i < ARRAY_SIZE(bc12s); i++) {
 		for (j = 0; j < ARRAY_SIZE(rps); j++) {
 			enum power_supply_usb_type bc12 = bc12s[i];
-			struct smb5_input_limit limit = smb5_input_limit(bc12, rps[j]);
+			struct smb5_input_limit limit =
+				smb5_input_limit(bc12, rps[j], smb5_input_ceiling(0));
 			int base = (bc12 == POWER_SUPPLY_USB_TYPE_CDP ||
 				    bc12 == POWER_SUPPLY_USB_TYPE_DCP) ? 1500000 : 500000;
 			int want = base;
@@ -124,6 +126,133 @@ static void smb5_input_limit_bounds_test(struct kunit *test)
 			KUNIT_EXPECT_EQ_MSG(test, limit.type,
 					    want > base ? POWER_SUPPLY_USB_TYPE_C : bc12,
 					    "bc12 %d rp %d", bc12, rps[j]);
+		}
+	}
+}
+
+static void smb5_input_ceiling_test(struct kunit *test)
+{
+	static const struct {
+		unsigned int param, ceiling;
+	} cases[] = {
+		{ 0, 3000000 },
+		{ 1, 500000 },
+		{ 499999, 500000 },
+		{ 500000, 500000 },
+		{ 549999, 500000 },
+		{ 1500000, 1500000 },
+		{ 1549999, 1500000 },
+		{ 3000000, 3000000 },
+		{ 3000001, 3000000 },
+		{ UINT_MAX, 3000000 },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++)
+		KUNIT_EXPECT_EQ_MSG(test, smb5_input_ceiling(cases[i].param),
+				    cases[i].ceiling, "max_input_ua %u", cases[i].param);
+}
+
+/*
+ * Under a ceiling every source decides at most the ceiling, the BC1.2 and
+ * Type-C classification is still reported, and a 500 mA ceiling holds CDP,
+ * DCP and Rp 1.5 A or 3.0 A at 500 mA.
+ */
+static void smb5_input_limit_ceiling_test(struct kunit *test)
+{
+	static const unsigned int params[] = { 500000, 1500000 };
+	int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(params); i++) {
+		unsigned int ceiling = smb5_input_ceiling(params[i]);
+
+		for (j = 0; j < ARRAY_SIZE(smb5_input_cases); j++) {
+			const struct smb5_input_case *c = &smb5_input_cases[j];
+			struct smb5_input_limit limit = smb5_input_limit(c->bc12, c->rp, ceiling);
+
+			KUNIT_EXPECT_EQ_MSG(test, limit.current_ua,
+					    min_t(int, c->current_ua, ceiling),
+					    "ceiling %u case %d", ceiling, j);
+			KUNIT_EXPECT_EQ_MSG(test, limit.type, c->type,
+					    "ceiling %u case %d", ceiling, j);
+		}
+	}
+
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_CDP, SMB5_RP_DEFAULT,
+					       500000).current_ua, 500000);
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_DCP, SMB5_RP_DEFAULT,
+					       500000).current_ua, 500000);
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_SDP, SMB5_RP_1P5,
+					       500000).current_ua, 500000);
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_SDP, SMB5_RP_3P0,
+					       500000).current_ua, 500000);
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_SDP, SMB5_RP_3P0,
+					       1500000).current_ua, 1500000);
+	KUNIT_EXPECT_EQ(test, smb5_input_limit(POWER_SUPPLY_USB_TYPE_SDP, SMB5_RP_DEFAULT,
+					       1500000).current_ua, 500000);
+}
+
+static int smb5_icl_fake_read(void *context, unsigned int reg, unsigned int *val)
+{
+	unsigned int *icl = context;
+
+	*val = reg == USBIN_CURRENT_LIMIT_CFG ? *icl : 0;
+	return 0;
+}
+
+static int smb5_icl_fake_write(void *context, unsigned int reg, unsigned int val)
+{
+	unsigned int *icl = context;
+
+	if (reg == USBIN_CURRENT_LIMIT_CFG)
+		*icl = val;
+	return 0;
+}
+
+/* The register never receives more than the ceiling, forced or not. */
+static void smb5_set_current_limit_ceiling_test(struct kunit *test)
+{
+	static const struct {
+		unsigned int param, ua, raw;
+	} cases[] = {
+		{ 0, 3000000, 0x3c },
+		{ 0, 1500000, 0x1e },
+		{ 500000, 3000000, 0x0a },
+		{ 500000, 1500000, 0x0a },
+		{ 500000, 500000, 0x0a },
+		{ 500000, 0, 0x00 },
+		{ 1500000, 3000000, 0x1e },
+		{ 1500000, 1000000, 0x14 },
+	};
+	const struct regmap_config cfg = {
+		.reg_bits = 16,
+		.val_bits = 8,
+		.max_register = 0xffff,
+		.reg_read = smb5_icl_fake_read,
+		.reg_write = smb5_icl_fake_write,
+	};
+	struct smb5_chip *chip;
+	struct device *dev;
+	unsigned int *icl;
+	int i, force;
+
+	dev = kunit_device_register(test, "smb5-icl-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	icl = kunit_kzalloc(test, sizeof(*icl), GFP_KERNEL);
+	chip = kunit_kzalloc(test, sizeof(*chip), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, icl);
+	KUNIT_ASSERT_NOT_NULL(test, chip);
+	chip->regmap = devm_regmap_init(dev, NULL, icl, &cfg);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, chip->regmap);
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		for (force = 0; force <= 1; force++) {
+			chip->input_ceiling_ua = smb5_input_ceiling(cases[i].param);
+			*icl = 0xff;
+			KUNIT_EXPECT_EQ(test, smb5_set_current_limit(chip, cases[i].ua, force), 0);
+			KUNIT_EXPECT_EQ_MSG(test, *icl, cases[i].raw,
+					    "max_input_ua %u, %u uA, force %d",
+					    cases[i].param, cases[i].ua, force);
 		}
 	}
 }
@@ -657,6 +786,9 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_rp_from_snk_status_test),
 	KUNIT_CASE(smb5_rp_sweep_test),
 	KUNIT_CASE(smb5_input_limit_bounds_test),
+	KUNIT_CASE(smb5_input_ceiling_test),
+	KUNIT_CASE(smb5_input_limit_ceiling_test),
+	KUNIT_CASE(smb5_set_current_limit_ceiling_test),
 	KUNIT_CASE(smb5_cc_from_status_test),
 	KUNIT_CASE(smb5_cc_attach_test),
 	KUNIT_CASE(smb5_cc_detach_test),
