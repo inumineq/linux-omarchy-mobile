@@ -1151,8 +1151,14 @@ static void smb5_stop(void *data)
 		unregister_pm_notifier(&chip->pm_nb);
 	}
 	smb5_set_prop_charging_enabled(chip, 0);
+	/*
+	 * Leave USB powering the system at the 500 mA default, as the init
+	 * sequence does; with USBIN suspended, a phone left on the cable
+	 * would drain its battery.
+	 */
+	smb5_set_current_limit(chip, SDP_CURRENT_UA);
 	regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
-			   USBIN_SUSPEND_BIT, USBIN_SUSPEND_BIT);
+			   USBIN_SUSPEND_BIT, 0);
 }
 
 static int smb5_get_iio_chan(struct smb5_chip *chip, struct iio_channel *chan,
