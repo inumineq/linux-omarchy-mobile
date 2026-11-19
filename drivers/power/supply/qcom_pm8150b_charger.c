@@ -426,13 +426,13 @@ struct smb5_register {
  * @batt_info:		Battery data from DT
  * @status_change_work: Worker to handle plug/unplug events
  * @cable_irq:		USB plugin IRQ
- * @wakeup_enabled:	If the cable IRQ will cause a wakeup
  * @usb_in_i_chan:	USB_IN current measurement channel
  * @usb_in_v_chan:	USB_IN voltage measurement channel
  * @chg_psy:		Charger power supply instance
  * @cc:			Type-C classification of the source without TCPM
  * @cc_paused:		System sleep: no timed passes of the status work
  * @plug_gen:		Plug edges counted in hard IRQ context
+ * @policy_gen:		@plug_gen as the last charging policy pass read it
  * @charge_end:		Charge limit in percent of the gauge capacity
  * @limit_held:		Last known side of the limit's hysteresis band
  * @limit_hold:		The charge limit keeps charging off
@@ -446,7 +446,6 @@ struct smb5_chip {
 
 	struct delayed_work status_change_work;
 	int cable_irq;
-	bool wakeup_enabled;
 
 	struct iio_channel *usb_in_i_chan;
 	struct iio_channel *usb_in_v_chan;
@@ -463,6 +462,7 @@ struct smb5_chip {
 	struct smb5_cc_track cc;
 	bool cc_paused;
 	atomic_t plug_gen;
+	unsigned int policy_gen;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -1306,6 +1306,7 @@ static void smb5_policy_work(struct work_struct *work)
 	mutex_lock(&chip->lock);
 	if (!chip->ready || chip->suspended)
 		goto unlock;
+	WRITE_ONCE(chip->policy_gen, atomic_read_acquire(&chip->plug_gen));
 
 	if (!chip->gauge) {
 		chip->gauge = power_supply_get_by_reference(dev_fwnode(chip->dev),
@@ -1465,6 +1466,13 @@ static int smb5_pm_notify(struct notifier_block *nb, unsigned long action,
 	if ((action == PM_SUSPEND_PREPARE || action == PM_HIBERNATION_PREPARE) &&
 	    READ_ONCE(chip->charging)) {
 		dev_info_ratelimited(chip->dev, "battery is charging, not suspending\n");
+		return notifier_from_errno(-EBUSY);
+	}
+
+	/* The policy has not yet decided whether to charge from a new cable. */
+	if ((action == PM_SUSPEND_PREPARE || action == PM_HIBERNATION_PREPARE) &&
+	    atomic_read(&chip->plug_gen) != READ_ONCE(chip->policy_gen)) {
+		dev_info_ratelimited(chip->dev, "cable change pending, not suspending\n");
 		return notifier_from_errno(-EBUSY);
 	}
 
@@ -2045,6 +2053,9 @@ static int smb5_probe(struct platform_device *pdev)
 	if (rc < 0)
 		return rc;
 
+	rc = devm_device_init_wakeup(chip->dev);
+	if (rc)
+		return dev_err_probe(chip->dev, rc, "Couldn't init wakeup\n");
 	rc = devm_pm_set_wake_irq(chip->dev, chip->cable_irq);
 	if (rc < 0)
 		return dev_err_probe(chip->dev, rc, "Couldn't set wake irq\n");
