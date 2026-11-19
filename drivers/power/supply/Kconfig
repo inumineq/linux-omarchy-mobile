@@ -1222,8 +1222,9 @@ config CHARGER_QCOM_SMB5_KUNIT_TEST
 	help
 	  Builds KUnit tests for the input current limit that the PM8150B
 	  charger driver derives from the BC1.2 detection result and the
-	  Type-C Rp level of the source, and for the decoding of the Rp
-	  status register. The tests run when the driver is loaded.
+	  Type-C Rp level of the source, for the decoding of the Type-C
+	  status registers, and for the attach state machine that decides
+	  when Rp may be used. The tests run when the driver is loaded.
 
 	  Only useful for developers running KUnit. If unsure, say N.
 
