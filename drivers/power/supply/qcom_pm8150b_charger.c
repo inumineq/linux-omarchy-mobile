@@ -197,6 +197,7 @@
 #define TYPE_C_SNK_STATUS			0x506
 #define TYPE_C_MISC_STATUS			0x50b
 #define TYPEC_SNK_SRC_MODE_BIT			BIT(6)
+#define TYPEC_CC_ATTACHED_BIT			BIT(0)
 #define DETECTED_SRC_TYPE_MASK			GENMASK(6, 0)
 #define SNK_RP_STD_DAM_BIT			BIT(6)
 #define SNK_RP_1P5_DAM_BIT			BIT(5)
@@ -272,6 +273,8 @@
 #define SDP_CURRENT_UA			500000
 #define CDP_CURRENT_UA			1500000
 #define DCP_CURRENT_UA			1500000
+#define RP_1P5_CURRENT_UA		1500000
+#define RP_3P0_CURRENT_UA		3000000
 #define CURRENT_MAX_UA			3000000
 #define FAST_CHARGE_CURRENT_MAX_UA		8000000
 #define APSD_MAX_RETRIES			3
@@ -352,6 +355,18 @@ static const struct smb5_temp_zone smb5_zones[] = {
 #define POLICY_REST_MARGIN_UV		35000
 /* Not in stock: stop at once this far above the over-voltage limit */
 #define POLICY_HARD_STOP_UV		15000
+
+/* Current advertised by a Type-C source through its Rp pull-up */
+enum smb5_rp {
+	SMB5_RP_DEFAULT,
+	SMB5_RP_1P5,
+	SMB5_RP_3P0,
+};
+
+struct smb5_input_limit {
+	int current_ua;
+	enum power_supply_usb_type type;
+};
 
 struct smb5_register {
 	u16 addr;
@@ -518,6 +533,67 @@ static int smb5_apsd_get_charger_type(struct smb5_chip *chip, int *val)
 	}
 
 	return 0;
+}
+
+/*
+ * Only a single clean Rp bit counts. Several bits, Rp shorted or a debug
+ * accessory read as the default USB current.
+ */
+static enum smb5_rp smb5_rp_from_snk_status(unsigned int stat)
+{
+	switch (stat & DETECTED_SRC_TYPE_MASK) {
+	case SNK_RP_1P5_BIT:
+		return SMB5_RP_1P5;
+	case SNK_RP_3P0_BIT:
+		return SMB5_RP_3P0;
+	default:
+		return SMB5_RP_DEFAULT;
+	}
+}
+
+static int smb5_get_rp(struct smb5_chip *chip, enum smb5_rp *rp)
+{
+	unsigned int misc, stat;
+	int rc;
+
+	*rp = SMB5_RP_DEFAULT;
+	rc = regmap_read(chip->regmap, chip->base + TYPE_C_MISC_STATUS, &misc);
+	if (rc || !(misc & TYPEC_CC_ATTACHED_BIT) || (misc & TYPEC_SNK_SRC_MODE_BIT))
+		return rc;
+
+	rc = regmap_read(chip->regmap, chip->base + TYPE_C_SNK_STATUS, &stat);
+	if (!rc)
+		*rp = smb5_rp_from_snk_status(stat);
+	return rc;
+}
+
+/*
+ * Input limit for a BC1.2 result and the Rp level of the source. Type-C
+ * current of 1.5 A or 3 A takes precedence over BC1.2 where it is higher;
+ * default Rp leaves the BC1.2 limit.
+ */
+static struct smb5_input_limit
+smb5_input_limit(enum power_supply_usb_type bc12, enum smb5_rp rp)
+{
+	struct smb5_input_limit limit = { SDP_CURRENT_UA, bc12 };
+	int rp_ua = 0;
+
+	if (bc12 == POWER_SUPPLY_USB_TYPE_CDP)
+		limit.current_ua = CDP_CURRENT_UA;
+	else if (bc12 == POWER_SUPPLY_USB_TYPE_DCP)
+		limit.current_ua = DCP_CURRENT_UA;
+
+	if (rp == SMB5_RP_3P0)
+		rp_ua = RP_3P0_CURRENT_UA;
+	else if (rp == SMB5_RP_1P5)
+		rp_ua = RP_1P5_CURRENT_UA;
+
+	if (rp_ua > limit.current_ua) {
+		limit.current_ua = rp_ua;
+		limit.type = POWER_SUPPLY_USB_TYPE_C;
+	}
+
+	return limit;
 }
 
 static int smb5_get_prop_charging_enabled(struct smb5_chip *chip, int *val)
@@ -702,7 +778,10 @@ static void smb5_status_change_work(struct work_struct *work)
 					     status_change_work.work);
 	int online, type = POWER_SUPPLY_USB_TYPE_UNKNOWN, current_ua = 0;
 	int voltage_uv, ret;
-	bool apsd = false, start_apsd = false, retry = false;
+	bool apsd = false, start_apsd = false, retry = false, follow_rp = false;
+	bool changed;
+	enum smb5_rp rp = SMB5_RP_DEFAULT;
+	struct smb5_input_limit limit;
 
 	mutex_lock(&chip->lock);
 	if (!chip->ready)
@@ -770,15 +849,28 @@ static void smb5_status_change_work(struct work_struct *work)
 		type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 	else if (ret)
 		goto fail;
-	else if (type == POWER_SUPPLY_USB_TYPE_CDP)
-		current_ua = CDP_CURRENT_UA;
-	else if (type == POWER_SUPPLY_USB_TYPE_DCP)
-		current_ua = DCP_CURRENT_UA;
+
+	/* With TCPM, a non-default Rp has already been handled above. */
+	if (!chip->has_tcpm) {
+		ret = smb5_get_rp(chip, &rp);
+		if (ret)
+			goto fail;
+	}
+	limit = smb5_input_limit(type, rp);
+	current_ua = limit.current_ua;
+	type = limit.type;
 
 	/* Also recheck early completed results; old DTs have no source-change IRQ. */
 	if (chip->apsd_retries < APSD_MAX_RETRIES) {
 		chip->apsd_retries++;
 		retry = true;
+	} else if (type == POWER_SUPPLY_USB_TYPE_C) {
+		/*
+		 * A source may lower Rp while attached, and the Type-C block
+		 * has no interrupt routed to the charger: keep polling.
+		 */
+		retry = true;
+		follow_rp = true;
 	}
 
 apply:
@@ -794,7 +886,9 @@ apply:
 			SDP_CURRENT_UA);
 		current_ua = SDP_CURRENT_UA;
 	}
-	chip->source_current_limit = clamp(current_ua, 0, CURRENT_MAX_UA);
+	current_ua = clamp(current_ua, 0, CURRENT_MAX_UA);
+	changed = chip->source_current_limit != current_ua || chip->usb_type != type;
+	chip->source_current_limit = current_ua;
 	ret = smb5_apply_input_limit(chip,
 		min(chip->source_current_limit, chip->user_current_limit), apsd);
 	if (ret)
@@ -814,7 +908,8 @@ apply:
 	chip->usb_type = type;
 	if (retry)
 		mod_delayed_work(system_wq, &chip->status_change_work, HZ);
-	power_supply_changed(chip->chg_psy);
+	if (changed || !follow_rp)
+		power_supply_changed(chip->chg_psy);
 	goto unlock;
 
 fail:
@@ -1744,3 +1839,7 @@ MODULE_AUTHOR("Caleb Connolly <caleb.connolly@linaro.org>");
 MODULE_DESCRIPTION("Qualcomm SMB5 Charger Driver");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("IIO_CONSUMER");
+
+#if IS_ENABLED(CONFIG_CHARGER_QCOM_SMB5_KUNIT_TEST)
+#include "qcom_pm8150b_charger_test.c"
+#endif
