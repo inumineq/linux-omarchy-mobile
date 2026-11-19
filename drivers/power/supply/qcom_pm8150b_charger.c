@@ -778,8 +778,7 @@ static void smb5_status_change_work(struct work_struct *work)
 					     status_change_work.work);
 	int online, type = POWER_SUPPLY_USB_TYPE_UNKNOWN, current_ua = 0;
 	int voltage_uv, ret;
-	bool apsd = false, start_apsd = false, retry = false, follow_rp = false;
-	bool changed;
+	bool apsd = false, start_apsd = false, retry = false;
 	enum smb5_rp rp = SMB5_RP_DEFAULT;
 	struct smb5_input_limit limit;
 
@@ -864,13 +863,6 @@ static void smb5_status_change_work(struct work_struct *work)
 	if (chip->apsd_retries < APSD_MAX_RETRIES) {
 		chip->apsd_retries++;
 		retry = true;
-	} else if (type == POWER_SUPPLY_USB_TYPE_C) {
-		/*
-		 * A source may lower Rp while attached, and the Type-C block
-		 * has no interrupt routed to the charger: keep polling.
-		 */
-		retry = true;
-		follow_rp = true;
 	}
 
 apply:
@@ -886,9 +878,7 @@ apply:
 			SDP_CURRENT_UA);
 		current_ua = SDP_CURRENT_UA;
 	}
-	current_ua = clamp(current_ua, 0, CURRENT_MAX_UA);
-	changed = chip->source_current_limit != current_ua || chip->usb_type != type;
-	chip->source_current_limit = current_ua;
+	chip->source_current_limit = clamp(current_ua, 0, CURRENT_MAX_UA);
 	ret = smb5_apply_input_limit(chip,
 		min(chip->source_current_limit, chip->user_current_limit), apsd);
 	if (ret)
@@ -908,8 +898,7 @@ apply:
 	chip->usb_type = type;
 	if (retry)
 		mod_delayed_work(system_wq, &chip->status_change_work, HZ);
-	if (changed || !follow_rp)
-		power_supply_changed(chip->chg_psy);
+	power_supply_changed(chip->chg_psy);
 	goto unlock;
 
 fail:
