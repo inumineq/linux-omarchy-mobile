@@ -360,7 +360,7 @@ static const struct smb5_temp_zone smb5_zones[] = {
 #define POLICY_REST_MARGIN_UV		35000
 /* Not in stock: stop at once this far above the over-voltage limit */
 #define POLICY_HARD_STOP_UV		15000
-/* Charge limit: 100 % is off; charging resumes this many points below it */
+/* Charge limit: 50-100 %, 100 is off; charging resumes this many points below it */
 #define POLICY_LIMIT_OFF		100
 #define POLICY_LIMIT_MIN		50
 #define POLICY_LIMIT_HYST		5
@@ -1159,6 +1159,11 @@ static bool smb5_limit_hold(bool *held, int end, int capacity)
 	return *held;
 }
 
+static bool smb5_limit_valid(int end)
+{
+	return end >= POLICY_LIMIT_MIN && end <= POLICY_LIMIT_OFF;
+}
+
 /* The policy's reasons to charge or not, except system sleep. */
 static bool smb5_charge_wanted(const struct smb5_chip *chip)
 {
@@ -1639,10 +1644,10 @@ static int smb5_set_property(struct power_supply *psy,
 		smb5_apply_charge_enable(chip);
 		return 0;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
-		if (val->intval < 0 || val->intval > POLICY_LIMIT_OFF)
+		if (!smb5_limit_valid(val->intval))
 			return -EINVAL;
 		/* A new limit charges up to it from wherever the battery is. */
-		WRITE_ONCE(chip->charge_end, max(val->intval, POLICY_LIMIT_MIN));
+		WRITE_ONCE(chip->charge_end, val->intval);
 		chip->limit_held = false;
 		smb5_limit_update(chip);
 		smb5_apply_charge_enable(chip);

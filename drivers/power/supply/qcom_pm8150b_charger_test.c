@@ -449,6 +449,24 @@ static void smb5_limit_cycle_test(struct kunit *test)
 				    run[i].hold, "step %d, capacity %d", i, run[i].capacity);
 }
 
+/* What the property accepts; the omarchy-mobile helper writes 80 to 100. */
+static void smb5_limit_valid_test(struct kunit *test)
+{
+	static const struct {
+		int end;
+		bool valid;
+	} cases[] = {
+		{ -1, false }, { 0, false }, { 30, false }, { 49, false },
+		{ 50, true }, { 80, true }, { 85, true }, { 90, true },
+		{ 95, true }, { 100, true }, { 101, false },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++)
+		KUNIT_EXPECT_EQ_MSG(test, smb5_limit_valid(cases[i].end), cases[i].valid,
+				    "end %d", cases[i].end);
+}
+
 /* The limit is one more reason not to charge; it never enables charging. */
 static void smb5_charge_enable_test(struct kunit *test)
 {
@@ -488,6 +506,7 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_cc_icl_unconfirmed_test),
 	KUNIT_CASE_PARAM(smb5_limit_hold_test, smb5_limit_gen_params),
 	KUNIT_CASE(smb5_limit_cycle_test),
+	KUNIT_CASE(smb5_limit_valid_test),
 	KUNIT_CASE(smb5_charge_enable_test),
 	{}
 };
