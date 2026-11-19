@@ -364,8 +364,6 @@ static const struct smb5_temp_zone smb5_zones[] = {
 #define POLICY_LIMIT_OFF		100
 #define POLICY_LIMIT_MIN		50
 #define POLICY_LIMIT_HYST		5
-/* Failed charge enable writes in a row before a cable edge counts as handled */
-#define POLICY_APPLY_TRIES		3
 
 /* Current advertised by a Type-C source through its Rp pull-up */
 enum smb5_rp {
@@ -435,7 +433,6 @@ struct smb5_register {
  * @cc_paused:		System sleep: no timed passes of the status work
  * @plug_gen:		Plug edges counted in hard IRQ context
  * @policy_gen:		@plug_gen as read by the last policy pass that applied its decision
- * @apply_fails:	Policy passes in a row whose charge enable write failed
  * @charge_end:		Charge limit in percent of the gauge capacity
  * @limit_held:		Last known side of the limit's hysteresis band
  * @limit_hold:		The charge limit keeps charging off
@@ -466,7 +463,6 @@ struct smb5_chip {
 	bool cc_paused;
 	atomic_t plug_gen;
 	unsigned int policy_gen;
-	unsigned int apply_fails;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -1185,22 +1181,6 @@ static int smb5_apply_charge_enable(struct smb5_chip *chip)
 	return smb5_set_prop_charging_enabled(chip, smb5_charge_enable(chip));
 }
 
-/*
- * Mark the cable edges up to @gen as handled once the policy pass that read
- * @gen has written its decision; @ret is that write's result. A write that
- * keeps failing stops holding suspend back after POLICY_APPLY_TRIES passes:
- * sleeping cannot make it worse, as suspend turns charging off.
- */
-static void smb5_policy_settle(unsigned int *policy_gen, unsigned int *fails,
-			       unsigned int gen, int ret)
-{
-	if (ret && ++*fails < POLICY_APPLY_TRIES)
-		return;
-	*fails = 0;
-	/* Pairs with smb5_pm_notify(): @charging is written before @gen. */
-	smp_store_release(policy_gen, gen);
-}
-
 static int smb5_gauge_read(struct smb5_chip *chip, enum power_supply_property psp,
 			   int *val)
 {
@@ -1468,7 +1448,12 @@ apply:
 	WRITE_ONCE(chip->charging, online && smb5_charge_wanted(chip));
 	if (ret)
 		dev_warn_ratelimited(chip->dev, "cannot set charging: %d\n", ret);
-	smb5_policy_settle(&chip->policy_gen, &chip->apply_fails, gen, ret);
+	/*
+	 * The edges up to @gen are handled, even if the write failed:
+	 * smb5_suspend() refuses to sleep unless charging is off. Pairs with
+	 * smb5_pm_notify(): @charging is written before the count.
+	 */
+	smp_store_release(&chip->policy_gen, gen);
 
 	/*
 	 * Only this work pets the charger watchdog. If it stops running, the
@@ -1496,7 +1481,7 @@ static int smb5_pm_notify(struct notifier_block *nb, unsigned long action,
 
 	/*
 	 * The policy has not yet applied a decision for a new cable. Pairs
-	 * with smb5_policy_settle(): once the generation is current, the
+	 * with smb5_policy_work(): once the generation is current, the
 	 * @charging read below is at least that pass's.
 	 */
 	if (smp_load_acquire(&chip->policy_gen) != atomic_read(&chip->plug_gen)) {
@@ -2109,10 +2094,37 @@ static int smb5_probe(struct platform_device *pdev)
 	return 0;
 }
 
-/* Nothing supervises the battery while asleep or after shutdown. */
+/*
+ * Nothing supervises the battery while asleep or after shutdown, so sleep
+ * only once the charge enable bit is known to be clear. A refusal changes
+ * nothing: the policy work keeps running and suspend may be tried again.
+ */
 static int smb5_suspend(struct device *dev)
 {
 	struct smb5_chip *chip = dev_get_drvdata(dev);
+	int ret;
+
+	if (chip->policy) {
+		mutex_lock(&chip->lock);
+		/* A cable edge after the notifier looked: let the policy see it. */
+		if (chip->policy_gen != atomic_read(&chip->plug_gen)) {
+			mutex_unlock(&chip->lock);
+			dev_info_ratelimited(dev, "cable change pending, not suspending\n");
+			return -EBUSY;
+		}
+		chip->suspended = true;
+		ret = smb5_apply_charge_enable(chip);
+		if (ret)
+			chip->suspended = false;
+		mutex_unlock(&chip->lock);
+		if (ret) {
+			dev_warn_ratelimited(dev, "cannot stop charging, not suspending: %d\n",
+					     ret);
+			return ret;
+		}
+		dev_dbg(dev, "charging off while suspended\n");
+		cancel_delayed_work_sync(&chip->policy_work);
+	}
 
 	if (!chip->has_tcpm) {
 		mutex_lock(&chip->lock);
@@ -2120,16 +2132,6 @@ static int smb5_suspend(struct device *dev)
 		mutex_unlock(&chip->lock);
 		cancel_delayed_work_sync(&chip->status_change_work);
 	}
-
-	if (!chip->policy)
-		return 0;
-
-	mutex_lock(&chip->lock);
-	chip->suspended = true;
-	smb5_apply_charge_enable(chip);
-	mutex_unlock(&chip->lock);
-	dev_dbg(dev, "charging off while suspended\n");
-	cancel_delayed_work_sync(&chip->policy_work);
 
 	return 0;
 }

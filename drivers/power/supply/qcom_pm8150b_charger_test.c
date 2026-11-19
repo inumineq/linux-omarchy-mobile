@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * KUnit tests for the PM8150B charger input current limit and charge limit.
+ * KUnit tests for the PM8150B charger input current limit, charge limit and
+ * suspend gate.
  * Included by qcom_pm8150b_charger.c, so the tested helpers can stay static.
  */
 
+#include <kunit/device.h>
 #include <kunit/test.h>
 
 struct smb5_input_case {
@@ -488,31 +490,166 @@ static void smb5_charge_enable_test(struct kunit *test)
 	}
 }
 
-/*
- * A cable edge counts as handled only after a pass wrote its decision; a
- * write that keeps failing gives up after three passes so suspend is not
- * refused for good.
- */
-static void smb5_policy_settle_test(struct kunit *test)
-{
-	static const struct {
-		unsigned int gen;
-		int ret;
-		unsigned int policy_gen;
-	} run[] = {
-		{ 2, -EIO, 1 }, { 3, -EIO, 1 }, { 3, -EIO, 3 },
-		{ 4, -EIO, 3 }, { 4, 0, 4 },
-		{ 5, -EIO, 4 }, { 5, -EIO, 4 }, { 6, 0, 6 },
-	};
-	unsigned int policy_gen = 1, fails = 0;
-	int i;
+/* PM8150B registers behind a fake regmap: only the charge enable bit. */
+struct smb5_fake_pmic {
+	unsigned int en;
+	int read_err;
+	int write_err;
+};
 
-	for (i = 0; i < ARRAY_SIZE(run); i++) {
-		smb5_policy_settle(&policy_gen, &fails, run[i].gen, run[i].ret);
-		KUNIT_EXPECT_EQ_MSG(test, policy_gen, run[i].policy_gen,
-				    "step %d, gen %u, write %d", i, run[i].gen, run[i].ret);
+#define SMB5_TEST_BASE		0x1000
+
+static int smb5_fake_read(void *context, unsigned int reg, unsigned int *val)
+{
+	struct smb5_fake_pmic *pmic = context;
+
+	if (pmic->read_err)
+		return pmic->read_err;
+	*val = reg == SMB5_TEST_BASE + CHARGING_ENABLE_CMD ? pmic->en : 0;
+	return 0;
+}
+
+static int smb5_fake_write(void *context, unsigned int reg, unsigned int val)
+{
+	struct smb5_fake_pmic *pmic = context;
+
+	if (pmic->write_err)
+		return pmic->write_err;
+	if (reg == SMB5_TEST_BASE + CHARGING_ENABLE_CMD)
+		pmic->en = val;
+	return 0;
+}
+
+static void smb5_test_idle_work(struct work_struct *work)
+{
+}
+
+enum smb5_sleep_edge {
+	SMB5_EDGE_NONE,
+	SMB5_EDGE_PENDING,	/* before the notifier: no pass has seen it */
+	SMB5_EDGE_LATE,		/* between the notifier and the suspend callback */
+};
+
+enum smb5_sleep_result {
+	SMB5_ASLEEP,
+	SMB5_REFUSED_BY_NOTIFIER,
+	SMB5_REFUSED_BY_SUSPEND,
+};
+
+struct smb5_sleep_case {
+	const char *desc;
+	bool wanted;		/* user, policy and limit allow charging */
+	bool plugged;
+	unsigned int en;	/* charge enable bit as suspend starts */
+	int read_err;
+	int write_err;
+	enum smb5_sleep_edge edge;
+	enum smb5_sleep_result result;
+	int err;		/* the refusal's error */
+	unsigned int en_after;
+};
+
+static const struct smb5_sleep_case smb5_sleep_cases[] = {
+	{ "off, cable in", false, true, 0, 0, 0, SMB5_EDGE_NONE, SMB5_ASLEEP, 0, 0 },
+	{ "off, cable out", false, false, 0, 0, 0, SMB5_EDGE_NONE, SMB5_ASLEEP, 0, 0 },
+	{ "on, cable in", true, true, 1, 0, 0, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_NOTIFIER, -EBUSY, 1 },
+	{ "on, cable out", true, false, 1, 0, 0, SMB5_EDGE_NONE, SMB5_ASLEEP, 0, 0 },
+	{ "off, write fails, cable in", false, true, 1, 0, -EIO, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_SUSPEND, -EIO, 1 },
+	{ "off, write fails, cable out", false, false, 1, 0, -EIO, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_SUSPEND, -EIO, 1 },
+	{ "on, write fails, cable in", true, true, 1, 0, -EIO, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_NOTIFIER, -EBUSY, 1 },
+	{ "on, write fails, cable out", true, false, 1, 0, -EIO, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_SUSPEND, -EIO, 1 },
+	{ "write fails, bit reads clear", false, true, 0, 0, -EIO, SMB5_EDGE_NONE,
+	  SMB5_ASLEEP, 0, 0 },
+	{ "read fails", false, true, 1, -EIO, 0, SMB5_EDGE_NONE,
+	  SMB5_REFUSED_BY_SUSPEND, -EIO, 1 },
+	{ "edge pending", false, true, 0, 0, 0, SMB5_EDGE_PENDING,
+	  SMB5_REFUSED_BY_NOTIFIER, -EBUSY, 0 },
+	{ "edge after the notifier", false, true, 0, 0, 0, SMB5_EDGE_LATE,
+	  SMB5_REFUSED_BY_SUSPEND, -EBUSY, 0 },
+};
+
+static void smb5_sleep_case_desc(const struct smb5_sleep_case *c, char *desc)
+{
+	strscpy(desc, c->desc, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(smb5_sleep, smb5_sleep_cases, smb5_sleep_case_desc);
+
+/*
+ * The system sleeps only with the charge enable bit known to be clear. A
+ * refused suspend leaves the driver as it was: not suspended, the policy
+ * work still queued, the Type-C status work not paused.
+ */
+static void smb5_sleep_test(struct kunit *test)
+{
+	const struct smb5_sleep_case *c = test->param_value;
+	const struct regmap_config cfg = {
+		.reg_bits = 16,
+		.val_bits = 8,
+		.max_register = 0xffff,
+		.reg_read = smb5_fake_read,
+		.reg_write = smb5_fake_write,
+	};
+	enum smb5_sleep_result result = SMB5_ASLEEP;
+	struct smb5_fake_pmic *pmic;
+	struct smb5_chip *chip;
+	struct device *dev;
+	bool asleep;
+	int err = 0;
+
+	dev = kunit_device_register(test, "smb5-sleep-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	pmic = kunit_kzalloc(test, sizeof(*pmic), GFP_KERNEL);
+	chip = kunit_kzalloc(test, sizeof(*chip), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pmic);
+	KUNIT_ASSERT_NOT_NULL(test, chip);
+	pmic->en = c->en;
+	pmic->read_err = c->read_err;
+	pmic->write_err = c->write_err;
+
+	chip->dev = dev;
+	chip->base = SMB5_TEST_BASE;
+	chip->regmap = devm_regmap_init(dev, NULL, pmic, &cfg);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, chip->regmap);
+	mutex_init(&chip->lock);
+	INIT_DELAYED_WORK(&chip->policy_work, smb5_test_idle_work);
+	INIT_DELAYED_WORK(&chip->status_change_work, smb5_test_idle_work);
+	chip->ready = true;
+	chip->policy = true;
+	chip->user_charge_enable = c->wanted;
+	chip->policy_charge_enable = true;
+	/* As the last policy pass left it */
+	chip->charging = c->plugged && c->wanted;
+	chip->policy_gen = 1;
+	atomic_set(&chip->plug_gen, c->edge == SMB5_EDGE_PENDING ? 2 : 1);
+	dev_set_drvdata(dev, chip);
+	schedule_delayed_work(&chip->policy_work, 60 * HZ);
+
+	err = notifier_to_errno(smb5_pm_notify(&chip->pm_nb, PM_SUSPEND_PREPARE, NULL));
+	if (err) {
+		result = SMB5_REFUSED_BY_NOTIFIER;
+	} else {
+		if (c->edge == SMB5_EDGE_LATE)
+			atomic_inc(&chip->plug_gen);
+		err = smb5_suspend(dev);
+		if (err)
+			result = SMB5_REFUSED_BY_SUSPEND;
 	}
-	KUNIT_EXPECT_EQ(test, fails, 0);
+	asleep = result == SMB5_ASLEEP;
+
+	KUNIT_EXPECT_EQ(test, result, c->result);
+	KUNIT_EXPECT_EQ(test, err, c->err);
+	KUNIT_EXPECT_EQ(test, pmic->en, c->en_after);
+	KUNIT_EXPECT_TRUE_MSG(test, !asleep || pmic->en == 0, "asleep with charging on");
+	KUNIT_EXPECT_EQ(test, chip->suspended, asleep);
+	KUNIT_EXPECT_EQ(test, chip->cc_paused, asleep);
+	KUNIT_EXPECT_EQ(test, delayed_work_pending(&chip->policy_work), !asleep);
+	cancel_delayed_work_sync(&chip->policy_work);
 }
 
 static struct kunit_case smb5_charger_test_cases[] = {
@@ -535,7 +672,7 @@ static struct kunit_case smb5_charger_test_cases[] = {
 	KUNIT_CASE(smb5_limit_cycle_test),
 	KUNIT_CASE(smb5_limit_valid_test),
 	KUNIT_CASE(smb5_charge_enable_test),
-	KUNIT_CASE(smb5_policy_settle_test),
+	KUNIT_CASE_PARAM(smb5_sleep_test, smb5_sleep_gen_params),
 	{}
 };
 
