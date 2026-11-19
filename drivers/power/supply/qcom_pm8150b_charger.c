@@ -197,6 +197,8 @@
 #define TYPE_C_SNK_STATUS			0x506
 #define TYPE_C_MISC_STATUS			0x50b
 #define TYPEC_SNK_SRC_MODE_BIT			BIT(6)
+#define TYPEC_DEBOUNCE_DONE_BIT			BIT(3)
+#define TYPEC_CC_ORIENTATION_BIT		BIT(1)
 #define TYPEC_CC_ATTACHED_BIT			BIT(0)
 #define DETECTED_SRC_TYPE_MASK			GENMASK(6, 0)
 #define SNK_RP_STD_DAM_BIT			BIT(6)
@@ -278,6 +280,9 @@
 #define CURRENT_MAX_UA			3000000
 #define FAST_CHARGE_CURRENT_MAX_UA		8000000
 #define APSD_MAX_RETRIES			3
+/* Time after an attach, and between two samples, before Rp is trusted */
+#define SMB5_CC_SETTLE			msecs_to_jiffies(500)
+#define SMB5_CC_MAX_SAMPLES		4
 
 /* PM8150B current registers use 50 mA steps. */
 #define CURRENT_SCALE_FACTOR		50000
@@ -368,6 +373,38 @@ struct smb5_input_limit {
 	enum power_supply_usb_type type;
 };
 
+/* Type-C status of the partner, as one sample */
+struct smb5_cc {
+	bool attached;		/* sink mode, CC attached and debounced */
+	bool flipped;		/* CC orientation bit */
+	enum smb5_rp rp;	/* default unless attached */
+};
+
+/*
+ * Type-C classification of a source on USBIN without TCPM. Rp is used only
+ * in SMB5_CC_CLASSIFIED; every other state holds the input at 500 mA.
+ */
+enum smb5_cc_state {
+	SMB5_CC_DETACHED,	/* no VBUS, or a plug edge not yet handled */
+	SMB5_CC_SETTLING,	/* attach seen, waiting SMB5_CC_SETTLE */
+	SMB5_CC_SAMPLED,	/* one sample taken, waiting for a matching one */
+	SMB5_CC_CLASSIFIED,	/* two matching samples: cc is in force */
+};
+
+struct smb5_cc_track {
+	enum smb5_cc_state state;
+	unsigned long since;	/* jiffies of the attach or the last sample */
+	unsigned int samples;
+	struct smb5_cc cc;	/* last sample, or the classified one */
+};
+
+struct smb5_cc_step {
+	enum smb5_rp rp;	/* default unless classified */
+	bool hold;		/* keep the input at 500 mA */
+	bool replugged;		/* a new attach: restart BC1.2 detection */
+	unsigned long recheck;	/* jiffies to the next pass, 0 for none */
+};
+
 struct smb5_register {
 	u16 addr;
 	u8 mask;
@@ -387,6 +424,8 @@ struct smb5_register {
  * @usb_in_i_chan:	USB_IN current measurement channel
  * @usb_in_v_chan:	USB_IN voltage measurement channel
  * @chg_psy:		Charger power supply instance
+ * @cc:			Type-C classification of the source without TCPM
+ * @cc_paused:		System sleep: no timed passes of the status work
  */
 struct smb5_chip {
 	struct device *dev;
@@ -411,6 +450,8 @@ struct smb5_chip {
 	unsigned int user_current_limit;
 	unsigned int source_current_limit;
 	enum power_supply_usb_type usb_type;
+	struct smb5_cc_track cc;
+	bool cc_paused;
 
 	/* Charging policy driven by the external fuel gauge */
 	bool policy;
@@ -551,20 +592,105 @@ static enum smb5_rp smb5_rp_from_snk_status(unsigned int stat)
 	}
 }
 
-static int smb5_get_rp(struct smb5_chip *chip, enum smb5_rp *rp)
+static struct smb5_cc smb5_cc_from_status(unsigned int misc, unsigned int snk)
 {
-	unsigned int misc, stat;
+	struct smb5_cc cc = { .rp = SMB5_RP_DEFAULT };
+
+	if (!(misc & TYPEC_CC_ATTACHED_BIT) || (misc & TYPEC_SNK_SRC_MODE_BIT) ||
+	    !(misc & TYPEC_DEBOUNCE_DONE_BIT))
+		return cc;
+
+	cc.attached = true;
+	cc.flipped = misc & TYPEC_CC_ORIENTATION_BIT;
+	cc.rp = smb5_rp_from_snk_status(snk);
+	return cc;
+}
+
+static int smb5_read_cc(struct smb5_chip *chip, struct smb5_cc *cc)
+{
+	unsigned int misc, snk;
 	int rc;
 
-	*rp = SMB5_RP_DEFAULT;
 	rc = regmap_read(chip->regmap, chip->base + TYPE_C_MISC_STATUS, &misc);
-	if (rc || !(misc & TYPEC_CC_ATTACHED_BIT) || (misc & TYPEC_SNK_SRC_MODE_BIT))
-		return rc;
-
-	rc = regmap_read(chip->regmap, chip->base + TYPE_C_SNK_STATUS, &stat);
 	if (!rc)
-		*rp = smb5_rp_from_snk_status(stat);
+		rc = regmap_read(chip->regmap, chip->base + TYPE_C_SNK_STATUS, &snk);
+	if (!rc)
+		*cc = smb5_cc_from_status(misc, snk);
 	return rc;
+}
+
+static bool smb5_cc_equal(const struct smb5_cc *a, const struct smb5_cc *b)
+{
+	return a->attached == b->attached && a->flipped == b->flipped &&
+	       a->rp == b->rp;
+}
+
+static void smb5_cc_restart(struct smb5_cc_track *t, unsigned long now)
+{
+	t->state = SMB5_CC_SETTLING;
+	t->since = now;
+	t->samples = 0;
+}
+
+/*
+ * One pass of the Type-C classification. A plug edge resets the track to
+ * SMB5_CC_DETACHED under the chip lock, so a pass never classifies an
+ * attach it has not seen settle. Without a plug edge, a changed CC
+ * orientation still means a new attach, and any other change of a
+ * classified sample restarts the classification.
+ */
+static struct smb5_cc_step smb5_cc_next(struct smb5_cc_track *t, bool online,
+					const struct smb5_cc *cc,
+					unsigned long now)
+{
+	struct smb5_cc_step step = { .rp = SMB5_RP_DEFAULT, .hold = true };
+	bool sampled = t->state == SMB5_CC_SAMPLED ||
+		       t->state == SMB5_CC_CLASSIFIED;
+
+	if (!online) {
+		t->state = SMB5_CC_DETACHED;
+		return step;
+	}
+
+	if (t->state == SMB5_CC_DETACHED ||
+	    (sampled && t->cc.attached && cc->attached &&
+	     t->cc.flipped != cc->flipped)) {
+		step.replugged = true;
+		smb5_cc_restart(t, now);
+	} else if (t->state == SMB5_CC_CLASSIFIED && !smb5_cc_equal(&t->cc, cc)) {
+		smb5_cc_restart(t, now);
+	}
+
+	if (t->state == SMB5_CC_CLASSIFIED) {
+		step.hold = false;
+		step.rp = t->cc.rp;
+		return step;
+	}
+
+	if (time_before(now, t->since + SMB5_CC_SETTLE)) {
+		step.recheck = t->since + SMB5_CC_SETTLE - now;
+		return step;
+	}
+
+	if (t->state == SMB5_CC_SAMPLED && smb5_cc_equal(&t->cc, cc)) {
+		t->state = SMB5_CC_CLASSIFIED;
+		step.hold = false;
+		step.rp = cc->rp;
+		return step;
+	}
+
+	t->cc = *cc;
+	t->since = now;
+	if (++t->samples >= SMB5_CC_MAX_SAMPLES) {
+		/* Never stable: classify without Rp until the next change. */
+		t->cc.rp = SMB5_RP_DEFAULT;
+		t->state = SMB5_CC_CLASSIFIED;
+		step.hold = false;
+		return step;
+	}
+	t->state = SMB5_CC_SAMPLED;
+	step.recheck = SMB5_CC_SETTLE;
+	return step;
 }
 
 /*
@@ -779,8 +905,10 @@ static void smb5_status_change_work(struct work_struct *work)
 	int online, type = POWER_SUPPLY_USB_TYPE_UNKNOWN, current_ua = 0;
 	int voltage_uv, ret;
 	bool apsd = false, start_apsd = false, retry = false;
-	enum smb5_rp rp = SMB5_RP_DEFAULT;
+	struct smb5_cc_step cc_step = { .rp = SMB5_RP_DEFAULT };
 	struct smb5_input_limit limit;
+	unsigned long delay;
+	struct smb5_cc cc;
 
 	mutex_lock(&chip->lock);
 	if (!chip->ready)
@@ -826,6 +954,15 @@ static void smb5_status_change_work(struct work_struct *work)
 		ret = smb5_get_prop_usb_online(chip, &online);
 		if (ret)
 			goto fail;
+		ret = smb5_read_cc(chip, &cc);
+		if (ret)
+			goto fail;
+		cc_step = smb5_cc_next(&chip->cc, online, &cc, jiffies);
+		if (cc_step.replugged) {
+			/* A new attach that no plug interrupt reported */
+			chip->apsd_started = false;
+			chip->apsd_retries = 0;
+		}
 		if (!online) {
 			chip->apsd_retries = 0;
 			goto apply;
@@ -849,13 +986,14 @@ static void smb5_status_change_work(struct work_struct *work)
 	else if (ret)
 		goto fail;
 
-	/* With TCPM, a non-default Rp has already been handled above. */
-	if (!chip->has_tcpm) {
-		ret = smb5_get_rp(chip, &rp);
-		if (ret)
-			goto fail;
-	}
-	limit = smb5_input_limit(type, rp);
+	/*
+	 * With TCPM, a non-default Rp has already been handled above. Without
+	 * it, hold 500 mA until the Type-C state of this attach is classified.
+	 */
+	if (cc_step.hold && !chip->has_tcpm)
+		limit = smb5_input_limit(POWER_SUPPLY_USB_TYPE_UNKNOWN, SMB5_RP_DEFAULT);
+	else
+		limit = smb5_input_limit(type, cc_step.rp);
 	current_ua = limit.current_ua;
 	type = limit.type;
 
@@ -896,14 +1034,18 @@ apply:
 		chip->apsd_retries = 0;
 	}
 	chip->usb_type = type;
-	if (retry)
-		mod_delayed_work(system_wq, &chip->status_change_work, HZ);
+	delay = retry ? HZ : 0;
+	if (cc_step.recheck && (!delay || cc_step.recheck < delay))
+		delay = cc_step.recheck;
+	if (delay && !chip->cc_paused)
+		mod_delayed_work(system_wq, &chip->status_change_work, delay);
 	power_supply_changed(chip->chg_psy);
 	goto unlock;
 
 fail:
 	chip->apsd_started = false;
 	chip->apsd_retries = 0;
+	chip->cc.state = SMB5_CC_DETACHED;
 	chip->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 	if (smb5_sink_vbus_present(chip)) {
 		/* Keep pSnkStdby so a flat battery is not left to carry the system. */
@@ -1419,6 +1561,15 @@ static irqreturn_t smb5_handle_usb_plugin(int irq, void *data)
 	mutex_lock(&chip->lock);
 	chip->apsd_started = false;
 	chip->apsd_retries = 0;
+	if (!chip->has_tcpm) {
+		/* From here until a classification of the new attach: 500 mA. */
+		chip->cc.state = SMB5_CC_DETACHED;
+		if (chip->ready && chip->source_current_limit > SDP_CURRENT_UA) {
+			chip->source_current_limit = SDP_CURRENT_UA;
+			smb5_set_current_limit(chip, min(SDP_CURRENT_UA,
+							 chip->user_current_limit));
+		}
+	}
 	if (chip->ready)
 		mod_delayed_work(system_wq, &chip->status_change_work, 0);
 	if (chip->ready && chip->policy)
@@ -1767,6 +1918,13 @@ static int smb5_suspend(struct device *dev)
 {
 	struct smb5_chip *chip = dev_get_drvdata(dev);
 
+	if (!chip->has_tcpm) {
+		mutex_lock(&chip->lock);
+		chip->cc_paused = true;
+		mutex_unlock(&chip->lock);
+		cancel_delayed_work_sync(&chip->status_change_work);
+	}
+
 	if (!chip->policy)
 		return 0;
 
@@ -1783,6 +1941,17 @@ static int smb5_suspend(struct device *dev)
 static int smb5_resume(struct device *dev)
 {
 	struct smb5_chip *chip = dev_get_drvdata(dev);
+
+	if (!chip->has_tcpm) {
+		/* Nothing watched the source while asleep: classify it again. */
+		mutex_lock(&chip->lock);
+		chip->cc_paused = false;
+		if (chip->cc.state != SMB5_CC_DETACHED)
+			smb5_cc_restart(&chip->cc, jiffies);
+		if (chip->ready)
+			mod_delayed_work(system_wq, &chip->status_change_work, 0);
+		mutex_unlock(&chip->lock);
+	}
 
 	if (!chip->policy)
 		return 0;
