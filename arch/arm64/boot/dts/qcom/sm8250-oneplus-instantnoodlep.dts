@@ -606,8 +606,6 @@
 	fsa4480: typec-mux@42 {
 		compatible = "fcs,fsa4480";
 		reg = <0x42>;
-		status = "disabled";
-
 		mode-switch;
 		orientation-switch;
 
@@ -748,7 +746,7 @@
 };
 
 &pm8150b_typec {
-	status = "disabled";
+	status = "okay";
 
 	vdd-pdphy-supply = <&vreg_l2a_3p1>;
 	vdd-vbus-supply = <&pm8150b_vbus>;
@@ -771,13 +769,6 @@
 					 PDO_FIXED_DUAL_ROLE |
 					 PDO_FIXED_USB_COMM |
 					 PDO_FIXED_DATA_SWAP)>;
-
-		altmodes {
-			displayport {
-				svid = /bits/ 16 <0xff01>;
-				vdo = <0x00001c46>;
-			};
-		};
 
 		ports {
 			#address-cells = <1>;
@@ -950,8 +941,10 @@
 };
 
 &usb_1_dwc3 {
-	/* Keep the tested USB gadget path independent of the Type-C stack. */
-	dr_mode = "peripheral";
+	/* Dual-role; retain gadget networking as the default role. */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
 };
 
 &usb_1_dwc3_hs_out {
@@ -966,6 +959,7 @@
 };
 
 &usb_1_qmpphy {
+	mode-switch;
 	vdda-phy-supply = <&vreg_l9a_1p2>;
 	vdda-pll-supply = <&vreg_l18a_0p92>;
 	status = "okay";
