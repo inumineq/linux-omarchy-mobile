@@ -946,6 +946,27 @@
 };
 
 &usb_1 {
+	/*
+	 * TEST ONLY, not for merging: hold clocks that nobody claims, to find
+	 * which one USB needs when clk_ignore_unused is dropped. dwc3-qcom
+	 * enables every clock listed here.
+	 */
+	clocks = <&gcc GCC_CFG_NOC_USB3_PRIM_AXI_CLK>,
+		 <&gcc GCC_USB30_PRIM_MASTER_CLK>,
+		 <&gcc GCC_AGGRE_USB3_PRIM_AXI_CLK>,
+		 <&gcc GCC_USB30_PRIM_SLEEP_CLK>,
+		 <&gcc GCC_USB30_PRIM_MOCK_UTMI_CLK>,
+		 <&gcc GCC_USB3_SEC_CLKREF_EN>,
+		 <&gcc GCC_PCIE1_PHY_REFGEN_CLK>,
+		 <&gcc GCC_PCIE2_PHY_REFGEN_CLK>;
+	clock-names = "cfg_noc",
+		      "core",
+		      "iface",
+		      "sleep",
+		      "mock_utmi",
+		      "xo",
+		      "test_refgen1",
+		      "test_refgen2";
 	status = "okay";
 };
 
