@@ -945,6 +945,16 @@
 	status = "okay";
 };
 
+&gcc {
+	/*
+	 * TEST: without clk_ignore_unused, USB does not attach once these two
+	 * are gated. Nothing in the device tree can own them, so leave them as
+	 * the bootloader set them.
+	 */
+	protected-clocks = <GCC_QUPV3_WRAP1_CORE_CLK>,
+			   <GCC_QUPV3_WRAP1_CORE_2X_CLK>;
+};
+
 &usb_1 {
 	status = "okay";
 };
