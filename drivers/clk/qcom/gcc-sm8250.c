@@ -2242,6 +2242,8 @@ static struct clk_branch gcc_qupv3_wrap1_core_2x_clk = {
 		.enable_mask = BIT(18),
 		.hw.init = &(struct clk_init_data){
 			.name = "gcc_qupv3_wrap1_core_2x_clk",
+			/* TEST: USB is lost when this is swept as unused */
+			.flags = CLK_IS_CRITICAL,
 			.ops = &clk_branch2_ops,
 		},
 	},
@@ -2255,6 +2257,8 @@ static struct clk_branch gcc_qupv3_wrap1_core_clk = {
 		.enable_mask = BIT(19),
 		.hw.init = &(struct clk_init_data){
 			.name = "gcc_qupv3_wrap1_core_clk",
+			/* TEST: USB is lost when this is swept as unused */
+			.flags = CLK_IS_CRITICAL,
 			.ops = &clk_branch2_ops,
 		},
 	},
